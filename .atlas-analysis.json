@@ -1,0 +1,156 @@
+{
+  "projectType": "framework",
+  "projectName": "Viaduct",
+  "projectDescription": "A GraphQL-based framework that provides a unified interface for accessing and interacting with any data source.",
+  "theme": "aspen",
+  "primaryColor": "#FF385C",
+  "lightColor": "#FFB4C2",
+  "darkColor": "#C13154",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/central-schema",
+              "concepts/tenant-modules",
+              "concepts/re-entrancy",
+              "concepts/generated-code"
+            ]
+          },
+          {
+            "group": "Building Your Tenant",
+            "pages": [
+              "guides/project-setup",
+              "guides/defining-schema",
+              "guides/writing-resolvers",
+              "guides/mutations",
+              "guides/pagination",
+              "guides/global-ids",
+              "guides/testing"
+            ]
+          },
+          {
+            "group": "Advanced Topics",
+            "pages": [
+              "advanced/scopes",
+              "advanced/batch-resolution",
+              "advanced/subqueries",
+              "advanced/field-classification",
+              "advanced/schema-management"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/overview",
+              "deployment/embedding-viaduct",
+              "deployment/development-server",
+              "deployment/production"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "APIs",
+            "pages": [
+              "api/tenant-api",
+              "api/service-api",
+              "api/engine-api"
+            ]
+          },
+          {
+            "group": "Schema Reference",
+            "pages": [
+              "api/directives",
+              "api/built-in-types",
+              "api/scalars"
+            ]
+          },
+          {
+            "group": "Gradle Plugins",
+            "pages": [
+              "api/module-plugin",
+              "api/application-plugin"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Tutorials",
+        "groups": [
+          {
+            "group": "Examples",
+            "pages": [
+              "tutorials/cli-starter",
+              "tutorials/starwars",
+              "tutorials/jetty-starter",
+              "tutorials/ktor-starter",
+              "tutorials/micronaut-starter"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Resources",
+        "groups": [
+          {
+            "group": "Community",
+            "pages": [
+              "resources/about",
+              "resources/contributing",
+              "resources/security",
+              "resources/api-stability"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Central schema serving a unified GraphQL interface",
+    "Hosted business logic with tenant modules",
+    "Re-entrant API for composable GraphQL fragments and queries",
+    "Type-safe code generation for GraphQL types and resolvers",
+    "Built-in support for pagination, global IDs, and connections",
+    "Schema scopes for API versioning and variants",
+    "Development server with auto-reload and GraphiQL",
+    "Production-tested at scale at Airbnb"
+  ],
+  "publicApiSurface": [
+    "viaduct.api.TenantModule",
+    "viaduct.api.ResolverBase",
+    "viaduct.api.NodeResolverBase",
+    "viaduct.api.FieldExecutionContext",
+    "viaduct.api.ExecutionContext",
+    "@Resolver annotation",
+    "@NodeResolver annotation",
+    "@ViaductServerConfiguration annotation",
+    "viaduct.service.api.Viaduct",
+    "viaduct.service.api.ExecutionInput",
+    "viaduct.service.api.ExecutionResult",
+    "viaduct.engine.api.Engine",
+    "@resolver directive",
+    "@backingData directive",
+    "@scope directive",
+    "@idOf directive",
+    "@connection directive",
+    "@edge directive",
+    "com.airbnb.viaduct.module-gradle-plugin",
+    "com.airbnb.viaduct.application-gradle-plugin"
+  ]
+}
