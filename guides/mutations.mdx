@@ -1,0 +1,552 @@
+---
+title: Mutations
+description: How to implement mutations in Viaduct
+---
+
+Mutations allow clients to modify data in your GraphQL API. In Viaduct, mutations are implemented as field resolvers on the `Mutation` type.
+
+## Defining Mutations
+
+Define mutations by extending the `Mutation` type in your schema:
+
+```graphql title="schema/mutations.graphqls"
+extend type Mutation {
+  createUser(input: CreateUserInput!): User @resolver
+  updateUser(id: ID! @idOf(type: "User"), input: UpdateUserInput!): User @resolver
+  deleteUser(id: ID! @idOf(type: "User")): Boolean @resolver
+}
+
+input CreateUserInput {
+  name: String!
+  email: String!
+  bio: String
+}
+
+input UpdateUserInput {
+  name: String
+  email: String
+  bio: String
+}
+```
+
+<Note>
+  Always use `extend type Mutation`, never `type Mutation`. Viaduct automatically creates the Mutation root type when it detects mutation extensions.
+</Note>
+
+## Mutation Resolvers
+
+Mutation resolvers are field resolvers with access to `MutationFieldExecutionContext`:
+
+### Create Mutation
+
+```kotlin
+import com.example.myapp.resolverbases.MutationResolvers
+import jakarta.inject.Inject
+import viaduct.api.Resolver
+import viaduct.api.grts.User
+
+@Resolver
+class CreateUserMutation @Inject constructor(
+    private val userService: UserService
+) : MutationResolvers.CreateUser() {
+    override suspend fun resolve(ctx: Context): User {
+        val input = ctx.arguments.input
+        
+        // Perform the mutation
+        val userId = userService.createUser(
+            name = input.name,
+            email = input.email,
+            bio = input.bio
+        )
+        
+        // Return a node reference to the created user
+        return ctx.nodeFor(userId)
+    }
+}
+```
+
+<Tip>
+  Return `ctx.nodeFor(id)` to create a reference to the newly created object. The node resolver will handle fetching the full data.
+</Tip>
+
+### Update Mutation
+
+```kotlin
+@Resolver
+class UpdateUserMutation @Inject constructor(
+    private val userService: UserService
+) : MutationResolvers.UpdateUser() {
+    override suspend fun resolve(ctx: Context): User {
+        val userId = ctx.arguments.id.internalID
+        val input = ctx.arguments.input
+        
+        // Update the user
+        userService.updateUser(
+            id = userId,
+            name = input.name,
+            email = input.email,
+            bio = input.bio
+        )
+        
+        // Return reference to updated user
+        return ctx.nodeFor(ctx.arguments.id)
+    }
+}
+```
+
+### Delete Mutation
+
+```kotlin
+@Resolver
+class DeleteUserMutation @Inject constructor(
+    private val userService: UserService
+) : MutationResolvers.DeleteUser() {
+    override suspend fun resolve(ctx: Context): Boolean {
+        val userId = ctx.arguments.id.internalID
+        return userService.deleteUser(userId)
+    }
+}
+```
+
+## Mutation Patterns
+
+### Return the Modified Object
+
+Most mutations return the object they modified:
+
+```graphql
+extend type Mutation {
+  updateUserName(id: ID! @idOf(type: "User"), name: String!): User @resolver
+}
+```
+
+```kotlin
+@Resolver
+class UpdateUserNameMutation @Inject constructor(
+    private val userService: UserService
+) : MutationResolvers.UpdateUserName() {
+    override suspend fun resolve(ctx: Context): User {
+        val userId = ctx.arguments.id.internalID
+        userService.updateName(userId, ctx.arguments.name)
+        return ctx.nodeFor(ctx.arguments.id)
+    }
+}
+```
+
+### Return a Payload Type
+
+For complex mutations, return a payload with multiple fields:
+
+```graphql
+type CreatePostPayload {
+  post: Post!
+  userErrors: [UserError!]!
+}
+
+type UserError {
+  message: String!
+  field: String
+}
+
+extend type Mutation {
+  createPost(input: CreatePostInput!): CreatePostPayload @resolver
+}
+```
+
+```kotlin
+@Resolver
+class CreatePostMutation @Inject constructor(
+    private val postService: PostService,
+    private val validator: PostValidator
+) : MutationResolvers.CreatePost() {
+    override suspend fun resolve(ctx: Context): CreatePostPayload {
+        val input = ctx.arguments.input
+        
+        // Validate input
+        val errors = validator.validate(input)
+        if (errors.isNotEmpty()) {
+            return CreatePostPayload.Builder(ctx)
+                .post(null)
+                .userErrors(errors.map { error ->
+                    UserError.Builder(ctx)
+                        .message(error.message)
+                        .field(error.field)
+                        .build()
+                })
+                .build()
+        }
+        
+        // Create post
+        val postId = postService.create(input)
+        
+        return CreatePostPayload.Builder(ctx)
+            .post(ctx.nodeFor(postId))
+            .userErrors(emptyList())
+            .build()
+    }
+}
+```
+
+### Return Boolean for Simple Operations
+
+For simple success/failure operations:
+
+```graphql
+extend type Mutation {
+  publishPost(id: ID! @idOf(type: "Post")): Boolean @resolver
+  archivePost(id: ID! @idOf(type: "Post")): Boolean @resolver
+}
+```
+
+## Using GlobalIDs
+
+Use `@idOf` for type-safe ID handling:
+
+```graphql
+extend type Mutation {
+  createPost(input: CreatePostInput!): Post @resolver
+}
+
+input CreatePostInput {
+  title: String!
+  content: String!
+  authorId: ID! @idOf(type: "User")
+  tagIds: [ID!] @idOf(type: "Tag")
+}
+```
+
+```kotlin
+@Resolver
+class CreatePostMutation @Inject constructor(
+    private val postService: PostService
+) : MutationResolvers.CreatePost() {
+    override suspend fun resolve(ctx: Context): Post {
+        val input = ctx.arguments.input
+        
+        // GlobalID types are automatically used
+        val authorId: GlobalID<User> = input.authorId
+        val tagIds: List<GlobalID<Tag>> = input.tagIds
+        
+        val postId = postService.createPost(
+            title = input.title,
+            content = input.content,
+            authorId = authorId.internalID,
+            tagIds = tagIds.map { it.internalID }
+        )
+        
+        return ctx.nodeFor(postId)
+    }
+}
+```
+
+<Note>
+  `GlobalID<T>` provides type safety - you can't accidentally pass a `GlobalID<User>` where a `GlobalID<Post>` is expected.
+</Note>
+
+## Validation and Error Handling
+
+### Throwing Exceptions
+
+Throw exceptions for validation errors:
+
+```kotlin
+@Resolver
+class CreateUserMutation @Inject constructor(
+    private val userService: UserService,
+    private val validator: EmailValidator
+) : MutationResolvers.CreateUser() {
+    override suspend fun resolve(ctx: Context): User {
+        val input = ctx.arguments.input
+        
+        // Validate email
+        if (!validator.isValid(input.email)) {
+            throw IllegalArgumentException("Invalid email: ${input.email}")
+        }
+        
+        // Check if email already exists
+        if (userService.emailExists(input.email)) {
+            throw IllegalStateException("Email already registered: ${input.email}")
+        }
+        
+        val userId = userService.createUser(input)
+        return ctx.nodeFor(userId)
+    }
+}
+```
+
+### User-Friendly Errors
+
+Return structured errors in the payload:
+
+```graphql
+type MutationPayload {
+  success: Boolean!
+  errors: [MutationError!]!
+}
+
+type MutationError {
+  code: ErrorCode!
+  message: String!
+  field: String
+}
+
+enum ErrorCode {
+  VALIDATION_ERROR
+  NOT_FOUND
+  PERMISSION_DENIED
+  CONFLICT
+}
+```
+
+## Chaining Mutations
+
+Use `ctx.mutation()` to call other mutations:
+
+```kotlin
+@Resolver
+class CreateUserAndPostMutation @Inject constructor(
+    private val userService: UserService,
+    private val postService: PostService
+) : MutationResolvers.CreateUserAndPost() {
+    override suspend fun resolve(ctx: Context): UserAndPost {
+        // Create user first
+        val userId = userService.createUser(ctx.arguments.userInput)
+        
+        // Execute another mutation
+        val post = ctx.mutation(
+            """
+            mutation CreatePost($input: CreatePostInput!) {
+                createPost(input: $input) {
+                    id
+                    title
+                }
+            }
+            """,
+            variables = mapOf(
+                "input" to mapOf(
+                    "title" to ctx.arguments.postTitle,
+                    "authorId" to userId.toString()
+                )
+            )
+        )
+        
+        return UserAndPost.Builder(ctx)
+            .user(ctx.nodeFor(userId))
+            .post(ctx.nodeFor(post.getId()))
+            .build()
+    }
+}
+```
+
+<Warning>
+  Avoid using `objectValueFragment` in mutation resolvers. Use `ctx.mutation()` to call other mutations instead.
+</Warning>
+
+## Authorization
+
+### Check Permissions
+
+```kotlin
+@Resolver
+class DeletePostMutation @Inject constructor(
+    private val postService: PostService,
+    private val authContext: AuthContext
+) : MutationResolvers.DeletePost() {
+    override suspend fun resolve(ctx: Context): Boolean {
+        val postId = ctx.arguments.id.internalID
+        val currentUserId = authContext.getCurrentUserId()
+        
+        // Check if user owns the post
+        val post = postService.getPost(postId)
+            ?: throw IllegalArgumentException("Post not found")
+        
+        if (post.authorId != currentUserId) {
+            throw PermissionDeniedException("You don't own this post")
+        }
+        
+        return postService.deletePost(postId)
+    }
+}
+```
+
+### Using Security Context
+
+```kotlin
+import com.example.myapp.common.SecurityContext
+
+@Resolver
+class CreatePostMutation @Inject constructor(
+    private val postService: PostService,
+    private val securityContext: SecurityContext
+) : MutationResolvers.CreatePost() {
+    override suspend fun resolve(ctx: Context): Post {
+        securityContext.requireAuthenticated()
+        
+        val input = ctx.arguments.input
+        val currentUserId = securityContext.getUserId()
+        
+        val postId = postService.createPost(
+            title = input.title,
+            content = input.content,
+            authorId = currentUserId
+        )
+        
+        return ctx.nodeFor(postId)
+    }
+}
+```
+
+## Real-World Example
+
+<CodeGroup>
+```graphql Schema
+extend type Mutation {
+  createCharacter(input: CreateCharacterInput!): Character @resolver
+  updateCharacterName(
+    id: ID! @idOf(type: "Character")
+    name: String!
+  ): Character @resolver
+  deleteCharacter(id: ID! @idOf(type: "Character")): Boolean @resolver
+}
+
+input CreateCharacterInput {
+  name: String!
+  birthYear: String
+  eyeColor: String
+  gender: String
+  hairColor: String
+  height: Int
+  mass: Float
+  homeworldId: ID @idOf(type: "Planet")
+  speciesId: ID @idOf(type: "Species")
+}
+```
+
+```kotlin Create
+@Resolver
+class CreateCharacterMutation @Inject constructor(
+    private val characterRepository: CharacterRepository,
+    private val securityContext: SecurityContext
+) : MutationResolvers.CreateCharacter() {
+    override suspend fun resolve(ctx: Context): Character {
+        securityContext.validateAccess()
+        
+        val input = ctx.arguments.input
+        
+        val character = characterRepository.create(
+            Character(
+                id = "",
+                name = input.name,
+                birthYear = input.birthYear,
+                eyeColor = input.eyeColor,
+                gender = input.gender,
+                hairColor = input.hairColor,
+                height = input.height,
+                mass = input.mass?.toFloat(),
+                homeworldId = input.homeworldId?.internalID,
+                speciesId = input.speciesId?.internalID
+            )
+        )
+        
+        return ctx.nodeFor(character.id)
+    }
+}
+```
+
+```kotlin Update
+@Resolver
+class UpdateCharacterNameMutation @Inject constructor(
+    private val characterRepository: CharacterRepository,
+    private val securityContext: SecurityContext
+) : MutationResolvers.UpdateCharacterName() {
+    override suspend fun resolve(ctx: Context): Character {
+        securityContext.validateAccess()
+        
+        val characterId = ctx.arguments.id.internalID
+        val newName = ctx.arguments.name
+        
+        characterRepository.updateName(characterId, newName)
+        
+        return ctx.nodeFor(ctx.arguments.id)
+    }
+}
+```
+
+```kotlin Delete
+@Resolver
+class DeleteCharacterMutation @Inject constructor(
+    private val characterRepository: CharacterRepository,
+    private val securityContext: SecurityContext
+) : MutationResolvers.DeleteCharacter() {
+    override suspend fun resolve(ctx: Context): Boolean {
+        securityContext.validateAccess()
+        
+        val characterId = ctx.arguments.id.internalID
+        return characterRepository.delete(characterId)
+    }
+}
+```
+</CodeGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use input types">
+    Group mutation arguments into input types:
+    
+    ```graphql
+    # Good
+    createUser(input: CreateUserInput!): User
+    
+    # Less maintainable
+    createUser(name: String!, email: String!, bio: String): User
+    ```
+  </Step>
+  
+  <Step title="Return node references">
+    Use `ctx.nodeFor()` instead of building objects inline:
+    
+    ```kotlin
+    // Good
+    return ctx.nodeFor(userId)
+    
+    // Bad - duplicates node resolver logic
+    return User.Builder(ctx).name(...).build()
+    ```
+  </Step>
+  
+  <Step title="Validate before mutating">
+    Check all preconditions before making changes:
+    
+    ```kotlin
+    // Validate
+    if (!validator.isValid(input)) {
+        throw ValidationException()
+    }
+    
+    // Then mutate
+    userService.update(input)
+    ```
+  </Step>
+  
+  <Step title="Use @idOf for type safety">
+    Declare ID types in your schema:
+    
+    ```graphql
+    input CreatePostInput {
+      authorId: ID! @idOf(type: "User")
+    }
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Pagination" icon="list" href="/guides/pagination">
+    Learn cursor-based pagination with connections
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Write tests for your mutations
+  </Card>
+</CardGroup>

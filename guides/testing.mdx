@@ -1,0 +1,792 @@
+---
+title: Testing
+description: How to test resolvers and tenants in Viaduct
+---
+
+Testing is essential for ensuring your Viaduct resolvers work correctly. This guide covers unit testing resolvers, integration testing, and best practices.
+
+## Unit Testing Resolvers
+
+Viaduct provides test utilities to help you test resolvers in isolation.
+
+### Test Base Class
+
+Extend `ViaductResolverTestBase` for resolver unit tests:
+
+```kotlin
+import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.shouldBe
+import viaduct.api.grts.User
+import viaduct.tenant.runtime.test.ViaductResolverTestBase
+
+class UserNodeResolverTest : FunSpec(), ViaductResolverTestBase {
+    private val userService = mockk<UserService>()
+    private val resolver = UserNodeResolver(userService)
+    
+    init {
+        test("should resolve user by id") {
+            // Arrange
+            val userId = "12345"
+            every { userService.getUser(userId) } returns UserData(
+                id = userId,
+                firstName = "Alice",
+                lastName = "Smith",
+                email = "alice@example.com"
+            )
+            
+            val ctx = contextForResolver(resolver, userId)
+            
+            // Act
+            val result = resolver.resolve(ctx)
+            
+            // Assert
+            result.getFirstName() shouldBe "Alice"
+            result.getLastName() shouldBe "Smith"
+            result.getEmail() shouldBe "alice@example.com"
+        }
+    }
+}
+```
+
+### Creating Test Contexts
+
+Use `contextForResolver()` to create execution contexts:
+
+```kotlin
+// For node resolvers
+val ctx = contextForResolver(
+    resolver = resolver,
+    id = "user-123"
+)
+
+// For field resolvers
+val ctx = contextForResolver(
+    resolver = resolver,
+    parent = parentObject,
+    arguments = arguments
+)
+```
+
+## Testing Node Resolvers
+
+### Simple Node Resolver Test
+
+```kotlin
+import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.shouldBe
+import io.mockk.*
+import viaduct.api.grts.Character
+import viaduct.tenant.runtime.test.ViaductResolverTestBase
+
+class CharacterNodeResolverTest : StringSpec(), ViaductResolverTestBase {
+    private val characterRepository = mockk<CharacterRepository>()
+    private val resolver = CharacterNodeResolver(characterRepository)
+    
+    init {
+        "should resolve character by id" {
+            // Given
+            val characterId = "1"
+            val characterData = Character(
+                id = characterId,
+                name = "Luke Skywalker",
+                birthYear = "19BBY",
+                height = 172
+            )
+            
+            every { characterRepository.findById(characterId) } returns characterData
+            
+            val ctx = contextForResolver(resolver, characterId)
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result.getName() shouldBe "Luke Skywalker"
+            result.getBirthYear() shouldBe "19BBY"
+            result.getHeight() shouldBe 172
+            
+            verify { characterRepository.findById(characterId) }
+        }
+        
+        "should handle missing character" {
+            // Given
+            every { characterRepository.findById(any()) } returns null
+            
+            val ctx = contextForResolver(resolver, "999")
+            
+            // When/Then
+            shouldThrow<IllegalArgumentException> {
+                resolver.resolve(ctx)
+            }
+        }
+    }
+}
+```
+
+### Batch Node Resolver Test
+
+```kotlin
+import io.kotest.matchers.collections.shouldHaveSize
+import viaduct.api.FieldValue
+
+class CharacterBatchResolverTest : StringSpec(), ViaductResolverTestBase {
+    private val characterRepository = mockk<CharacterRepository>()
+    private val resolver = CharacterNodeResolver(characterRepository)
+    
+    init {
+        "should batch resolve multiple characters" {
+            // Given
+            val characterIds = listOf("1", "2", "3")
+            val characters = listOf(
+                Character(id = "1", name = "Luke Skywalker"),
+                Character(id = "2", name = "Leia Organa"),
+                Character(id = "3", name = "Han Solo")
+            )
+            
+            every { characterRepository.findByIds(characterIds) } returns characters
+            
+            val contexts = characterIds.map { id ->
+                contextForResolver(resolver, id)
+            }
+            
+            // When
+            val results = resolver.batchResolve(contexts)
+            
+            // Then
+            results shouldHaveSize 3
+            results.forEach { it.isValue shouldBe true }
+            
+            results[0].value.getName() shouldBe "Luke Skywalker"
+            results[1].value.getName() shouldBe "Leia Organa"
+            results[2].value.getName() shouldBe "Han Solo"
+        }
+        
+        "should handle partial failures in batch" {
+            // Given
+            val characterIds = listOf("1", "2", "999")
+            val characters = listOf(
+                Character(id = "1", name = "Luke"),
+                Character(id = "2", name = "Leia")
+            )
+            
+            every { characterRepository.findByIds(characterIds) } returns characters
+            
+            val contexts = characterIds.map { 
+                contextForResolver(resolver, it)
+            }
+            
+            // When
+            val results = resolver.batchResolve(contexts)
+            
+            // Then
+            results shouldHaveSize 3
+            results[0].isValue shouldBe true
+            results[1].isValue shouldBe true
+            results[2].isError shouldBe true
+        }
+    }
+}
+```
+
+## Testing Field Resolvers
+
+### Simple Field Resolver
+
+```kotlin
+class UserDisplayNameResolverTest : StringSpec(), ViaductResolverTestBase {
+    private val resolver = UserDisplayNameResolver()
+    
+    init {
+        "should combine first and last name" {
+            // Given
+            val user = User.Builder(mockContext)
+                .firstName("Alice")
+                .lastName("Smith")
+                .build()
+            
+            val ctx = contextForResolver(
+                resolver = resolver,
+                parent = user
+            )
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result shouldBe "Alice Smith"
+        }
+        
+        "should handle null first name" {
+            // Given
+            val user = User.Builder(mockContext)
+                .firstName(null)
+                .lastName("Smith")
+                .build()
+            
+            val ctx = contextForResolver(resolver, user)
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result shouldBe "Smith"
+        }
+    }
+}
+```
+
+### Field Resolver with Arguments
+
+```kotlin
+class UserPostsResolverTest : StringSpec(), ViaductResolverTestBase {
+    private val postService = mockk<PostService>()
+    private val resolver = UserPostsResolver(postService)
+    
+    init {
+        "should resolve user posts with pagination" {
+            // Given
+            val userId = "user-1"
+            val posts = listOf(
+                PostData(id = "1", title = "First Post"),
+                PostData(id = "2", title = "Second Post")
+            )
+            
+            every { 
+                postService.getUserPosts(
+                    userId = userId,
+                    offset = 0,
+                    limit = 11,
+                    status = null
+                )
+            } returns posts
+            
+            val user = User.Builder(mockContext)
+                .id(globalIdFor(User.Reflection, userId))
+                .build()
+            
+            val args = User_Posts_Arguments.Builder()
+                .first(10)
+                .build()
+            
+            val ctx = contextForResolver(
+                resolver = resolver,
+                parent = user,
+                arguments = args
+            )
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result.getEdges().size shouldBe 2
+            verify {
+                postService.getUserPosts(userId, 0, 11, null)
+            }
+        }
+    }
+}
+```
+
+## Testing Mutations
+
+```kotlin
+class CreateUserMutationTest : StringSpec(), ViaductResolverTestBase {
+    private val userService = mockk<UserService>()
+    private val resolver = CreateUserMutation(userService)
+    
+    init {
+        "should create user with valid input" {
+            // Given
+            val input = CreateUserInput.Builder()
+                .name("Alice Smith")
+                .email("alice@example.com")
+                .bio("Developer")
+                .build()
+            
+            val userId = "new-user-id"
+            every { 
+                userService.createUser(
+                    name = "Alice Smith",
+                    email = "alice@example.com",
+                    bio = "Developer"
+                )
+            } returns userId
+            
+            val args = Mutation_CreateUser_Arguments.Builder()
+                .input(input)
+                .build()
+            
+            val ctx = contextForResolver(
+                resolver = resolver,
+                arguments = args
+            )
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result.getId().internalID shouldBe userId
+            verify {
+                userService.createUser("Alice Smith", "alice@example.com", "Developer")
+            }
+        }
+        
+        "should reject invalid email" {
+            // Given
+            val input = CreateUserInput.Builder()
+                .name("Alice")
+                .email("invalid-email")
+                .build()
+            
+            every { userService.createUser(any(), any(), any()) } throws 
+                IllegalArgumentException("Invalid email")
+            
+            val args = Mutation_CreateUser_Arguments.Builder()
+                .input(input)
+                .build()
+            
+            val ctx = contextForResolver(resolver, args)
+            
+            // When/Then
+            shouldThrow<IllegalArgumentException> {
+                resolver.resolve(ctx)
+            }
+        }
+    }
+}
+```
+
+## Integration Testing
+
+Test your GraphQL API end-to-end:
+
+### With Ktor
+
+```kotlin
+import io.ktor.client.request.*
+import io.ktor.client.statement.*
+import io.ktor.http.*
+import io.ktor.server.testing.*
+import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.shouldBe
+
+class GraphQLIntegrationTest : StringSpec({
+    "should execute GraphQL query" {
+        testApplication {
+            application {
+                configureViaduct()
+            }
+            
+            val response = client.post("/graphql") {
+                contentType(ContentType.Application.Json)
+                setBody("""
+                    {
+                        "query": "{ user(id: \"User:1\") { id name email } }"
+                    }
+                """)
+            }
+            
+            response.status shouldBe HttpStatusCode.OK
+            
+            val body = response.bodyAsText()
+            body shouldContain "\"name\":\"Alice Smith\""
+        }
+    }
+})
+```
+
+### With Micronaut
+
+```kotlin
+import io.kotest.core.spec.style.StringSpec
+import io.kotest.matchers.shouldBe
+import io.micronaut.http.HttpRequest
+import io.micronaut.http.client.HttpClient
+import io.micronaut.http.client.annotation.Client
+import io.micronaut.test.extensions.kotest.annotation.MicronautTest
+import jakarta.inject.Inject
+
+@MicronautTest
+class GraphQLIntegrationTest : StringSpec() {
+    @Inject
+    @field:Client("/")
+    lateinit var client: HttpClient
+    
+    init {
+        "should query user by id" {
+            val query = """
+                query GetUser {
+                    user(id: "User:1") {
+                        id
+                        name
+                        email
+                    }
+                }
+            """
+            
+            val request = HttpRequest.POST("/graphql", mapOf(
+                "query" to query
+            ))
+            
+            val response = client.toBlocking().retrieve(request, Map::class.java)
+            val data = response["data"] as Map<*, *>
+            val user = data["user"] as Map<*, *>
+            
+            user["name"] shouldBe "Alice Smith"
+        }
+    }
+}
+```
+
+## Test Fixtures
+
+Create reusable test data builders:
+
+```kotlin
+object TestFixtures {
+    fun createUser(
+        id: String = "test-user",
+        firstName: String = "Test",
+        lastName: String = "User",
+        email: String = "test@example.com"
+    ) = UserData(
+        id = id,
+        firstName = firstName,
+        lastName = lastName,
+        email = email
+    )
+    
+    fun createPost(
+        id: String = "test-post",
+        title: String = "Test Post",
+        content: String = "Test content",
+        authorId: String = "test-user"
+    ) = PostData(
+        id = id,
+        title = title,
+        content = content,
+        authorId = authorId
+    )
+}
+
+// Usage
+class SomeResolverTest : StringSpec() {
+    init {
+        "should do something" {
+            val user = TestFixtures.createUser(
+                firstName = "Alice",
+                email = "alice@example.com"
+            )
+            // ...
+        }
+    }
+}
+```
+
+## Mocking Services
+
+Use MockK for service mocking:
+
+```kotlin
+import io.mockk.*
+
+class UserResolverTest : StringSpec() {
+    private val userService = mockk<UserService>()
+    
+    init {
+        beforeEach {
+            clearMocks(userService)
+        }
+        
+        "should call service with correct parameters" {
+            // Setup mock
+            every { userService.getUser("123") } returns UserData(
+                id = "123",
+                name = "Alice"
+            )
+            
+            // Test code...
+            
+            // Verify calls
+            verify(exactly = 1) { userService.getUser("123") }
+        }
+        
+        "should handle service errors" {
+            // Mock exception
+            every { userService.getUser(any()) } throws RuntimeException("Service down")
+            
+            shouldThrow<RuntimeException> {
+                // Test code...
+            }
+        }
+    }
+}
+```
+
+## Testing with GlobalIDs
+
+```kotlin
+class PostResolverTest : StringSpec(), ViaductResolverTestBase {
+    private val postService = mockk<PostService>()
+    private val resolver = PostAuthorResolver(postService)
+    
+    init {
+        "should resolve author from GlobalID" {
+            // Create GlobalID
+            val authorId = globalIdFor(User.Reflection, "author-123")
+            
+            val post = Post.Builder(mockContext)
+                .authorId(authorId)
+                .build()
+            
+            val ctx = contextForResolver(resolver, post)
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result.getId() shouldBe authorId
+        }
+    }
+}
+```
+
+## Testing Pagination
+
+```kotlin
+class UserPostsConnectionTest : StringSpec(), ViaductResolverTestBase {
+    private val postService = mockk<PostService>()
+    private val resolver = UserPostsResolver(postService)
+    
+    init {
+        "should return connection with correct pagination" {
+            // Given
+            val posts = (1..11).map { i ->
+                PostData(id = "$i", title = "Post $i")
+            }
+            
+            every {
+                postService.getUserPosts(
+                    userId = "user-1",
+                    offset = 0,
+                    limit = 11,
+                    status = null
+                )
+            } returns posts
+            
+            val args = User_Posts_Arguments.Builder()
+                .first(10)
+                .build()
+            
+            val ctx = contextForResolver(resolver, args)
+            
+            // When
+            val result = resolver.resolve(ctx)
+            
+            // Then
+            result.getEdges().size shouldBe 10
+            result.getPageInfo().getHasNextPage() shouldBe true
+            result.getPageInfo().getHasPreviousPage() shouldBe false
+        }
+    }
+}
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Test resolver logic, not framework">
+    Focus on testing your business logic:
+    
+    ```kotlin
+    // Good - tests business logic
+    "should calculate total from items" {
+        val items = listOf(10, 20, 30)
+        result.getTotal() shouldBe 60
+    }
+    
+    // Bad - tests framework behavior
+    "should call node resolver" {
+        // Don't test Viaduct's internal behavior
+    }
+    ```
+  </Step>
+  
+  <Step title="Use test fixtures">
+    Create reusable test data:
+    
+    ```kotlin
+    object TestData {
+        fun user(name: String = "Test") = UserData(...)
+    }
+    ```
+  </Step>
+  
+  <Step title="Mock external dependencies">
+    Mock services, databases, and HTTP clients:
+    
+    ```kotlin
+    private val userService = mockk<UserService>()
+    private val httpClient = mockk<HttpClient>()
+    ```
+  </Step>
+  
+  <Step title="Test edge cases">
+    Cover error scenarios:
+    
+    ```kotlin
+    "should handle null values" { }
+    "should handle empty lists" { }
+    "should handle missing data" { }
+    ```
+  </Step>
+  
+  <Step title="Verify service calls">
+    Check that services are called correctly:
+    
+    ```kotlin
+    verify { userService.getUser("123") }
+    verify(exactly = 1) { postService.create(any()) }
+    ```
+  </Step>
+</Steps>
+
+## Real-World Test Example
+
+<CodeGroup>
+```kotlin Resolver
+@Resolver
+class CharacterFilmCountResolver @Inject constructor(
+    private val filmRepository: FilmRepository
+) : CharacterResolvers.FilmCount() {
+    override suspend fun batchResolve(
+        contexts: List<Context>
+    ): List<FieldValue<Int>> {
+        val characterIds = contexts.map { 
+            it.objectValue.getId().internalID 
+        }
+        
+        val filmCounts = filmRepository.getFilmCountsByCharacters(characterIds)
+        
+        return contexts.map { ctx ->
+            val characterId = ctx.objectValue.getId().internalID
+            FieldValue.ofValue(filmCounts[characterId] ?: 0)
+        }
+    }
+}
+```
+
+```kotlin Test
+class CharacterFilmCountResolverTest : StringSpec(), ViaductResolverTestBase {
+    private val filmRepository = mockk<FilmRepository>()
+    private val resolver = CharacterFilmCountResolver(filmRepository)
+    
+    init {
+        "should batch resolve film counts" {
+            // Given
+            val characterIds = listOf("1", "2", "3")
+            val filmCounts = mapOf(
+                "1" to 5,
+                "2" to 3,
+                "3" to 7
+            )
+            
+            every { 
+                filmRepository.getFilmCountsByCharacters(characterIds)
+            } returns filmCounts
+            
+            val contexts = characterIds.map { id ->
+                val character = Character.Builder(mockContext)
+                    .id(globalIdFor(Character.Reflection, id))
+                    .build()
+                
+                contextForResolver(
+                    resolver = resolver,
+                    parent = character
+                )
+            }
+            
+            // When
+            val results = resolver.batchResolve(contexts)
+            
+            // Then
+            results shouldHaveSize 3
+            results[0].value shouldBe 5
+            results[1].value shouldBe 3
+            results[2].value shouldBe 7
+            
+            verify(exactly = 1) {
+                filmRepository.getFilmCountsByCharacters(characterIds)
+            }
+        }
+        
+        "should return zero for characters with no films" {
+            // Given
+            every {
+                filmRepository.getFilmCountsByCharacters(any())
+            } returns emptyMap()
+            
+            val character = Character.Builder(mockContext)
+                .id(globalIdFor(Character.Reflection, "999"))
+                .build()
+            
+            val ctx = contextForResolver(resolver, character)
+            
+            // When
+            val results = resolver.batchResolve(listOf(ctx))
+            
+            // Then
+            results[0].value shouldBe 0
+        }
+    }
+}
+```
+</CodeGroup>
+
+## Testing Tools
+
+### Recommended Libraries
+
+<CardGroup cols={2}>
+  <Card title="Kotest" icon="vial">
+    Powerful Kotlin testing framework with multiple styles
+  </Card>
+  <Card title="MockK" icon="mask">
+    Mocking library designed for Kotlin
+  </Card>
+  <Card title="AssertJ" icon="check-double">
+    Fluent assertion library
+  </Card>
+  <Card title="JUnit 5" icon="flask">
+    Industry-standard testing platform
+  </Card>
+</CardGroup>
+
+### Dependencies
+
+```kotlin title="build.gradle.kts"
+dependencies {
+    testImplementation(libs.viaduct.test.fixtures)
+    testImplementation(libs.kotest.runner.junit)
+    testImplementation(libs.kotest.assertions.core)
+    testImplementation(libs.mockk)
+    testImplementation(libs.assertj.core)
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Project Setup" icon="folder" href="/guides/project-setup">
+    Review project structure and setup
+  </Card>
+  <Card title="Writing Resolvers" icon="code" href="/guides/writing-resolvers">
+    Learn resolver implementation patterns
+  </Card>
+</CardGroup>
+
+## Further Reading
+
+- [Kotest Documentation](https://kotest.io/)
+- [MockK Guide](https://mockk.io/)
+- [Testing Best Practices](https://kentcdodds.com/blog/common-mistakes-with-react-testing-library)

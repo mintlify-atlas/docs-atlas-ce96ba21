@@ -1,0 +1,501 @@
+---
+title: Batch Resolution
+description: Solve the N+1 problem with efficient batch loading using Viaduct's built-in DataLoader pattern
+---
+
+Batch resolution is Viaduct's built-in solution to the N+1 problem in GraphQL. Instead of implementing separate DataLoader classes, you simply override the `batchResolve` function in your resolver, and Viaduct handles batching automatically.
+
+## The N+1 Problem
+
+Consider this common scenario:
+
+```graphql
+type Query {
+  recommendedListings: [Listing] @resolver
+}
+
+type Listing implements Node {
+  id: ID!
+  title: String
+  host: User @resolver
+}
+
+type User implements Node {
+  id: ID!
+  name: String
+}
+```
+
+A query that returns 100 listings:
+
+```graphql
+query {
+  recommendedListings {
+    id
+    title
+    host {
+      name
+    }
+  }
+}
+```
+
+Without batching, this results in:
+- 1 query to fetch recommended listings
+- 100 queries to fetch each host (N+1 problem)
+
+## The batchResolve Solution
+
+Viaduct solves this by allowing you to implement `batchResolve` instead of the standard `resolve` function. The framework automatically batches contexts before passing them to your resolver.
+
+### Example: Node Resolver
+
+Here's a batch node resolver for the `Listing` type:
+
+```kotlin
+@Resolver
+class ListingNodeResolver @Inject constructor(
+    val listingClient: ListingClient
+) : NodeResolvers.Listing() {
+    override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<Listing>> {
+        // Extract all IDs from the batch
+        val listingIds = contexts.map { it.id.internalID }
+        
+        // Single batch call to the service
+        val responses = listingClient.fetchBatch(listingIds)
+        
+        // Map results back to contexts in the same order
+        return contexts.map { ctx ->
+            val listingId = ctx.id.internalID
+            val response = responses[listingId]
+            
+            if (response != null) {
+                FieldValue.ofValue(
+                    Listing.Builder(ctx)
+                        .title(response.title)
+                        .description(response.description)
+                        .build()
+                )
+            } else {
+                FieldValue.ofError(
+                    IllegalArgumentException("Listing not found: $listingId")
+                )
+            }
+        }
+    }
+}
+```
+
+### Example: Field Resolver
+
+Here's a batch field resolver that fetches related data:
+
+```kotlin
+@Resolver(objectValueFragment = "fragment _ on Character { id }")
+class CharacterFilmCountResolver @Inject constructor(
+    val characterFilmsRepository: CharacterFilmsRepository
+) : CharacterResolvers.FilmCount() {
+    override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<Int>> {
+        // Extract unique character IDs
+        val characterIds = contexts.map { it.objectValue.getId().internalID }.toSet()
+        
+        // Single batch query for all film counts
+        val filmCounts = characterIds.associateWith { characterId ->
+            characterFilmsRepository.findFilmsByCharacterId(characterId).size
+        }
+        
+        // Map results back to contexts
+        return contexts.map { ctx ->
+            val characterId = ctx.objectValue.getId().internalID
+            FieldValue.ofValue(filmCounts[characterId] ?: 0)
+        }
+    }
+}
+```
+
+## How It Works
+
+### 1. Input: List of Contexts
+
+`batchResolve` receives a list of `Context` objects. Each context represents one field resolution request:
+
+```kotlin
+// For query: allCharacters { filmCount }
+contexts = [
+    Context(Character(id="1")),  // Luke's filmCount request
+    Context(Character(id="2")),  // Leia's filmCount request  
+    Context(Character(id="3"))   // Han's filmCount request
+]
+```
+
+Each context provides:
+- `ctx.objectValue` - The parent object this field belongs to
+- `ctx.arguments` - Arguments passed to the field
+- `ctx.id` - The global ID (for node resolvers)
+- Framework data for building results
+
+### 2. Batch Data Fetching
+
+Perform a single operation to fetch all required data:
+
+```kotlin
+val ids = contexts.map { it.id.internalID }
+val results = dataSource.fetchBatch(ids)  // Single call instead of N calls
+```
+
+<Tip>
+  Deduplicate IDs before fetching if the same entity appears multiple times in the batch.
+</Tip>
+
+### 3. Output: List of FieldValue
+
+Return a list with the **same size** and **same order** as the input contexts:
+
+```kotlin
+return contexts.map { ctx ->
+    val id = ctx.id.internalID
+    val data = results[id]
+    
+    FieldValue.ofValue(buildObject(data))
+}
+```
+
+## FieldValue: Success or Error
+
+The `FieldValue` wrapper represents either a successfully resolved value or an error:
+
+### Success Value
+
+```kotlin
+FieldValue.ofValue(
+    User.Builder(ctx)
+        .name("Luke Skywalker")
+        .email("luke@rebellion.com")
+        .build()
+)
+```
+
+### Error Value
+
+```kotlin
+FieldValue.ofError(
+    IllegalArgumentException("User not found: $userId")
+)
+```
+
+When returning an error:
+- The corresponding field in the GraphQL response will be `null`
+- An error will be added to the response's `errors` array
+- The request continues processing other fields
+
+### Null Value
+
+For nullable fields, you can return null as a valid value:
+
+```kotlin
+FieldValue.ofValue(null)  // Valid for nullable fields
+```
+
+## Real-World Example: Star Wars Demo
+
+The Star Wars demo includes several batch resolvers:
+
+### Character Node Resolver
+
+```kotlin
+@Resolver
+class CharacterNodeResolver @Inject constructor(
+    private val characterRepository: CharacterRepository
+) : NodeResolvers.Character() {
+    override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<Character>> {
+        val characterIds = contexts.map { it.id.internalID }
+        
+        val characters = characterIds.mapNotNull {
+            characterRepository.findById(it)
+        }
+        
+        return contexts.map { ctx ->
+            val characterId = ctx.id.internalID
+            characters.firstOrNull { it.id == characterId }?.let {
+                FieldValue.ofValue(
+                    CharacterBuilder(ctx).build(it)
+                )
+            } ?: FieldValue.ofError(
+                IllegalArgumentException("Character not found: $characterId")
+            )
+        }
+    }
+}
+```
+
+### Film Count Batch Resolver
+
+```kotlin
+@Resolver(objectValueFragment = "fragment _ on Character { id }")
+class CharacterFilmCountResolver @Inject constructor(
+    val characterFilmsRepository: CharacterFilmsRepository
+) : CharacterResolvers.FilmCount() {
+    override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<Int>> {
+        val characterIds = contexts.map { it.objectValue.getId().internalID }.toSet()
+        
+        val filmCounts = characterIds.associateWith { characterId ->
+            characterFilmsRepository.findFilmsByCharacterId(characterId).size
+        }
+        
+        return contexts.map { ctx ->
+            val characterId = ctx.objectValue.getId().internalID
+            FieldValue.ofValue(filmCounts[characterId] ?: 0)
+        }
+    }
+}
+```
+
+## When to Use batchResolve
+
+<CardGroup cols={2}>
+  <Card title="Use Batching When" icon="check">
+    - Fetching data from external services that support batch operations
+    - The same field is selected for many parent objects
+    - You're experiencing N+1 query problems
+    - Your data source has a batch API endpoint
+  </Card>
+  
+  <Card title="Skip Batching When" icon="xmark">
+    - The resolver has no external data dependencies
+    - The field is rarely selected for multiple parents
+    - The logic is purely computational
+    - Your data source doesn't support batch operations
+  </Card>
+</CardGroup>
+
+## Performance Considerations
+
+### Deduplication
+
+If the same ID appears multiple times in a batch, deduplicate before fetching:
+
+```kotlin
+val uniqueIds = contexts.map { it.id.internalID }.toSet()
+val results = dataSource.fetchBatch(uniqueIds.toList())
+```
+
+### Parallel Fetching
+
+If you need data from multiple sources, fetch them in parallel:
+
+```kotlin
+override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<Listing>> {
+    val ids = contexts.map { it.id.internalID }
+    
+    val (listings, photos, reviews) = coroutineScope {
+        val listingsDeferred = async { listingService.fetchBatch(ids) }
+        val photosDeferred = async { photoService.fetchBatch(ids) }
+        val reviewsDeferred = async { reviewService.fetchBatch(ids) }
+        
+        Triple(
+            listingsDeferred.await(),
+            photosDeferred.await(),
+            reviewsDeferred.await()
+        )
+    }
+    
+    return contexts.map { ctx ->
+        val id = ctx.id.internalID
+        FieldValue.ofValue(
+            buildListing(listings[id], photos[id], reviews[id])
+        )
+    }
+}
+```
+
+### Caching
+
+Viaduct's memoization cache is separate from batching. If you need caching, implement it at the service layer:
+
+```kotlin
+class ListingService @Inject constructor(
+    private val client: ListingClient,
+    private val cache: Cache<String, Listing>
+) {
+    suspend fun fetchBatch(ids: List<String>): Map<String, Listing> {
+        val cached = ids.mapNotNull { id -> 
+            cache.get(id)?.let { id to it }
+        }.toMap()
+        
+        val missing = ids - cached.keys
+        val fetched = if (missing.isNotEmpty()) {
+            client.fetchBatch(missing).also { results ->
+                results.forEach { (id, listing) -> cache.put(id, listing) }
+            }
+        } else {
+            emptyMap()
+        }
+        
+        return cached + fetched
+    }
+}
+```
+
+## Error Handling
+
+### Partial Failures
+
+Handle partial failures gracefully:
+
+```kotlin
+override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<User>> {
+    val ids = contexts.map { it.id.internalID }
+    val results = userService.fetchBatch(ids)  // May return partial results
+    
+    return contexts.map { ctx ->
+        val id = ctx.id.internalID
+        val user = results[id]
+        
+        if (user != null) {
+            FieldValue.ofValue(buildUser(ctx, user))
+        } else {
+            // Return error for missing users, but allow request to continue
+            FieldValue.ofError(
+                IllegalArgumentException("User not found: $id")
+            )
+        }
+    }
+}
+```
+
+### Complete Failures
+
+If the entire batch operation fails, you can throw an exception:
+
+```kotlin
+override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<User>> {
+    val ids = contexts.map { it.id.internalID }
+    
+    val results = try {
+        userService.fetchBatch(ids)
+    } catch (e: ServiceException) {
+        // Return errors for all contexts
+        return contexts.map { 
+            FieldValue.ofError(e)
+        }
+    }
+    
+    // ... map results
+}
+```
+
+## Testing Batch Resolvers
+
+```kotlin
+class ListingNodeResolverTest {
+    private val mockClient = mockk<ListingClient>()
+    private val resolver = ListingNodeResolver(mockClient)
+    
+    @Test
+    fun `batchResolve fetches multiple listings`() = runTest {
+        val contexts = listOf(
+            mockContext(GlobalID.from("Listing", "1")),
+            mockContext(GlobalID.from("Listing", "2")),
+            mockContext(GlobalID.from("Listing", "3"))
+        )
+        
+        coEvery { 
+            mockClient.fetchBatch(listOf("1", "2", "3")) 
+        } returns mapOf(
+            "1" to ListingData("Cozy Apartment"),
+            "2" to ListingData("Beach House"),
+            "3" to ListingData("Mountain Cabin")
+        )
+        
+        val results = resolver.batchResolve(contexts)
+        
+        assertEquals(3, results.size)
+        assertTrue(results.all { it.isValue })
+    }
+    
+    @Test
+    fun `batchResolve handles missing items`() = runTest {
+        val contexts = listOf(
+            mockContext(GlobalID.from("Listing", "1")),
+            mockContext(GlobalID.from("Listing", "999"))  // Doesn't exist
+        )
+        
+        coEvery { 
+            mockClient.fetchBatch(listOf("1", "999")) 
+        } returns mapOf(
+            "1" to ListingData("Cozy Apartment")
+            // "999" is missing
+        )
+        
+        val results = resolver.batchResolve(contexts)
+        
+        assertEquals(2, results.size)
+        assertTrue(results[0].isValue)
+        assertTrue(results[1].isError)
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Request Only Needed Fields">
+    In `objectValueFragment`, request only the fields you actually need:
+    
+    ```kotlin
+    // ✅ Good: Request only what's needed
+    @Resolver(objectValueFragment = "fragment _ on Character { id }")
+    
+    // ❌ Bad: Requesting unnecessary fields
+    @Resolver(objectValueFragment = "fragment _ on Character { id name email avatar }")
+    ```
+  </Accordion>
+  
+  <Accordion title="Deduplicate IDs">
+    Remove duplicate IDs before hitting the data layer:
+    
+    ```kotlin
+    val uniqueIds = contexts.map { it.id.internalID }.toSet()
+    val results = dataSource.fetchBatch(uniqueIds.toList())
+    ```
+  </Accordion>
+  
+  <Accordion title="Maintain Order">
+    Always return results in the same order as input contexts:
+    
+    ```kotlin
+    // ✅ Good: Map each context to its result
+    return contexts.map { ctx -> 
+        FieldValue.ofValue(results[ctx.id.internalID])
+    }
+    
+    // ❌ Bad: Returning results in arbitrary order
+    return results.values.map { FieldValue.ofValue(it) }
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle Nullability Correctly">
+    Match your schema's nullability:
+    
+    ```kotlin
+    // For nullable field: user: User
+    FieldValue.ofValue(null)  // ✅ OK
+    
+    // For non-null field: user: User!
+    FieldValue.ofError(Exception("Not found"))  // ✅ OK
+    FieldValue.ofValue(null)  // ❌ Error: violates non-null constraint
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Resolvers" icon="code" href="/essentials/resolvers">
+    Learn about resolver basics and the @resolver directive
+  </Card>
+  
+  <Card title="Subqueries" icon="diagram-project" href="/advanced/subqueries">
+    Execute GraphQL queries from within resolvers
+  </Card>
+</CardGroup>

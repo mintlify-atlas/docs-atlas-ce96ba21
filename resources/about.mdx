@@ -1,0 +1,66 @@
+---
+title: About Viaduct
+description: History, vision, and the open source journey
+---
+
+## What is Viaduct?
+
+Viaduct is a GraphQL-based system that provides a unified interface for accessing and interacting with any data source. It serves as an open source data-oriented service mesh, committed to fostering an inclusive and collaborative community where developers can contribute, innovate, and help shape the future of data-oriented development.
+
+## History at Airbnb
+
+The Viaduct project was initially started in 2020 to address the complexity and inefficiencies caused by an ever-growing dependency graph of microservices at Airbnb. It offers a data-oriented service mesh that provides a unified interface, based on GraphQL, for accessing and interacting with any data source while hosting business logic. This approach provides a single global schema, maintained by the teams that own the data, enabling reliable and consistent data access and mutations without each team having to implement logic for every query. Viaduct helps avoid a tangled microservices architecture by organizing service interactions around data rather than remote procedure calls, making data access more efficient and safe.
+
+At the beginning of 2024, Airbnb began a rebuild of the original Viaduct system to improve developer experience, modularity, and architectural integrity. Over time, the previous system had become complex, with multiple ways to implement functionality and weak abstraction boundaries, making it hard to evolve without disrupting users. The rebuild introduces a simplified and unified developer API and a strong modular structure through "tenant modules." It also creates clearer boundaries between the GraphQL execution engine, the tenant developer API, and hosted application code, enhancing maintainability and enabling easier evolution of each layer independently. This modernization has allowed Airbnb to scale Viaduct use significantly while reducing operational overhead and improving performance and reliability. The new design and architecture support gradual migration and increased developer productivity, benefiting Airbnb by centralizing business logic, reducing overhead, and improving the developer experience across hundreds of teams.
+
+### Growth and Scale
+
+Since 2020, Viaduct at Airbnb has experienced remarkable growth:
+
+- Traffic through Viaduct has grown by a factor of eight
+- The number of teams hosting code in Viaduct has doubled to 130+ (with hundreds of weekly active developers)
+- The codebase hosted by Viaduct has tripled to over 1.5M lines (plus about the same in test code)
+- All this has been achieved while keeping operational overhead constant, halving incident-minutes, and keeping costs growing linearly with QPS
+
+## Open Source Journey
+
+Airbnb open-sourced the rebuilt Viaduct in September 2025 to share its benefits with the broader developer community.
+
+<Note>
+The Viaduct engine is in production, at scale, at Airbnb where it has proven reliable. The developer API of Viaduct is under active development. Check our [roadmap](/roadmap) to see which parts of the API are more or less subject to future change.
+</Note>
+
+Our intent from the start of Viaduct Modern was to open-source it. We believe that setting out to build software for the world will result in higher quality software for ourselves. As a significant consumer of open-source software, we feel an obligation to give back. While we've learned a lot by working with Airbnb developers, we think Viaduct can be massively improved by incorporating ideas and contributions from the wider community.
+
+We're open-sourcing at an interesting moment. Viaduct is **mature and battle-tested** and also **new and evolving**. The new engine is now in full production, while the new tenant API is still in alpha. We've implemented a small but robust kernel of the new API and are using it in a few demanding use cases. By open-sourcing early, we hope to grow a community who will shape the API with us together.
+
+## Vision
+
+Three principles have guided Viaduct since day one and still anchor the project: a central schema served by hosted business logic via a re-entrant API.
+
+### Central Schema
+
+Viaduct serves a single, integrated schema connecting all of your domains across your company—the central schema. While that schema is developed in a decentralized manner by many teams, it's one, highly connected graph.
+
+### Hosted Business Logic
+
+Teams should host their business logic directly in Viaduct. This runs counter to what many consider to be best practices in GraphQL, which is that GraphQL servers should be a thin layer over microservices that host the real business logic. Viaduct is a serverless platform for hosting business logic, allowing developers to focus on writing business logic rather than on operational issues.
+
+### Re-entrancy
+
+At the heart of Viaduct's developer experience is what we call re-entrancy: Logic hosted on Viaduct composes with other logic hosted on Viaduct by issuing GraphQL fragments and queries. Re-entrancy is crucial for maintaining modularity in a large codebase and avoiding classic monolith hazards.
+
+## Is Viaduct for You?
+
+Although our use case proves Viaduct can scale to massive graphs, we think it's also a great GraphQL server when you're just starting. We've emphasized developer ergonomics from day one, and we believe Viaduct provides one of the best environments for building GraphQL solutions. Whether you're operating a supergraph today or just kicking the tires, we'd love for you to try Viaduct Modern and tell us what works—and what doesn't.
+
+## Build Requirements
+
+- Mac OS X or Linux
+- JDK 11+, 64-bit
+
+## Next Steps
+
+- Get started with our [CLI starter guide](/docs/getting_started/)
+- Explore [example applications](https://github.com/viaduct-dev)
+- Join the [community discussions](https://github.com/airbnb/viaduct/discussions)

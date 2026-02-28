@@ -1,0 +1,408 @@
+---
+title: Installation
+description: Set up Viaduct dependencies in your Gradle project
+---
+
+# Installation
+
+This guide walks you through setting up Viaduct in a new or existing Gradle project. You'll configure the Viaduct Gradle plugins, add the necessary dependencies, and set up the project structure for developing Viaduct tenant modules.
+
+## Prerequisites
+
+- Java JDK 21 or higher
+- Gradle 8.10+ (Gradle 9.1.0+ supported with Kotlin 2.0+)
+- Kotlin 1.9.x or 2.x (depending on your Gradle version)
+
+<Info>
+  Refer to the [Gradle-Kotlin compatibility matrix](https://docs.gradle.org/current/userguide/compatibility.html#kotlin) to choose compatible versions for your project.
+</Info>
+
+## Create a new project
+
+If you're starting from scratch, create a new directory for your project:
+
+```bash
+mkdir my-viaduct-app
+cd my-viaduct-app
+```
+
+## Configure Gradle
+
+<Steps>
+  <Step title="Create settings.gradle.kts">
+    Create a `settings.gradle.kts` file to configure plugin management and dependency resolution:
+
+    ```kotlin settings.gradle.kts
+    pluginManagement {
+        repositories {
+            mavenCentral()
+            gradlePluginPortal()
+        }
+    }
+
+    dependencyResolutionManagement {
+        repositories {
+            mavenCentral()
+        }
+        versionCatalogs {
+            create("libs") {
+                from(files("gradle/viaduct.versions.toml"))
+            }
+        }
+    }
+
+    rootProject.name = "my-viaduct-app"
+    ```
+
+    This configuration:
+    - Sets up Maven Central and Gradle Plugin Portal as plugin repositories
+    - Configures dependency resolution to use Maven Central
+    - Creates a version catalog from a TOML file for managing dependencies
+  </Step>
+
+  <Step title="Create version catalog">
+    Create a `gradle/viaduct.versions.toml` file to manage dependency versions:
+
+    ```toml gradle/viaduct.versions.toml
+    [versions]
+    viaduct = "0.24.0"
+    kotlin = "2.2.21"
+    logback = "1.5.21"
+    coroutines = "1.5.2"
+    jackson = "2.9.10"
+
+    [plugins]
+    kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+    viaduct-application = { id = "com.airbnb.viaduct.application-gradle-plugin", version.ref = "viaduct" }
+    viaduct-module = { id = "com.airbnb.viaduct.module-gradle-plugin", version.ref = "viaduct" }
+
+    [libraries]
+    # Viaduct
+    viaduct-bom = { group = "com.airbnb.viaduct", name = "bom", version.ref = "viaduct" }
+    viaduct-api = { group = "com.airbnb.viaduct", name = "api", version.ref = "viaduct" }
+    viaduct-runtime = { group = "com.airbnb.viaduct", name = "runtime", version.ref = "viaduct" }
+    viaduct-test-fixtures = { group = "com.airbnb.viaduct", name = "test-fixtures", version.ref = "viaduct" }
+
+    # Runtime dependencies
+    logback-classic = { group = "ch.qos.logback", name = "logback-classic", version.ref = "logback" }
+    kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+    jackson-databind = { group = "com.fasterxml.jackson.core", name = "jackson-databind", version.ref = "jackson" }
+    ```
+
+    <Note>
+      Make sure to check [Maven Central](https://central.sonatype.com/namespace/com.airbnb.viaduct) for the latest Viaduct version.
+    </Note>
+  </Step>
+
+  <Step title="Create build.gradle.kts">
+    Create a `build.gradle.kts` file with the Viaduct plugins and dependencies:
+
+    ```kotlin build.gradle.kts
+    plugins {
+        alias(libs.plugins.kotlinJvm)
+        alias(libs.plugins.viaduct.application)
+        alias(libs.plugins.viaduct.module)
+        application
+    }
+
+    // Configure the Viaduct application plugin
+    viaductApplication {
+        modulePackagePrefix.set("com.example.viadapp")
+    }
+
+    // Configure the Viaduct module plugin
+    viaductModule {
+        modulePackageSuffix.set("resolvers")
+    }
+
+    dependencies {
+        // Core Viaduct dependencies
+        implementation(libs.viaduct.api)
+        implementation(libs.viaduct.runtime)
+
+        // Runtime dependencies
+        implementation(libs.logback.classic)
+        implementation(libs.kotlinx.coroutines.core)
+        implementation(libs.jackson.databind)
+
+        // Test dependencies
+        testImplementation(libs.viaduct.test.fixtures)
+    }
+
+    // Configure the application plugin (for CLI apps)
+    application {
+        mainClass.set("com.example.viadapp.ViaductApplicationKt")
+    }
+    ```
+
+    <Warning>
+      Both `viaduct.application` and `viaduct.module` plugins are required. The application plugin must be applied to the root project, while the module plugin can be applied to any project that contains resolvers.
+    </Warning>
+  </Step>
+
+  <Step title="Create Gradle wrapper">
+    Generate the Gradle wrapper to ensure consistent builds:
+
+    ```bash
+    gradle wrapper --gradle-version 8.14
+    ```
+
+    This creates `gradlew` (Linux/macOS) and `gradlew.bat` (Windows) scripts that you can commit to version control.
+  </Step>
+</Steps>
+
+## Set up project structure
+
+Viaduct applications follow a specific directory structure:
+
+<Steps>
+  <Step title="Create schema directory">
+    Create the directory structure for your GraphQL schema:
+
+    ```bash
+    mkdir -p src/main/viaduct/schema
+    ```
+
+    All `*.graphqls` files in this directory will be included in your schema.
+  </Step>
+
+  <Step title="Create Kotlin source directories">
+    Create directories for your application code and resolvers:
+
+    ```bash
+    mkdir -p src/main/kotlin/com/example/viadapp
+    mkdir -p src/main/kotlin/com/example/viadapp/resolvers
+    ```
+
+    The package structure should match the `modulePackagePrefix` configured in your `build.gradle.kts`.
+  </Step>
+
+  <Step title="Create test directories">
+    Create directories for your tests:
+
+    ```bash
+    mkdir -p src/test/kotlin/com/example/viadapp
+    ```
+  </Step>
+</Steps>
+
+Your final project structure should look like this:
+
+```
+my-viaduct-app/
+├── build.gradle.kts
+├── settings.gradle.kts
+├── gradle/
+│   └── viaduct.versions.toml
+├── gradlew
+├── gradlew.bat
+└── src/
+    ├── main/
+    │   ├── kotlin/
+    │   │   └── com/example/viadapp/
+    │   │       ├── ViaductApplication.kt
+    │   │       └── resolvers/
+    │   └── viaduct/
+    │       └── schema/
+    │           └── schema.graphqls
+    └── test/
+        └── kotlin/
+            └── com/example/viadapp/
+```
+
+## Understanding Viaduct dependencies
+
+Viaduct provides several artifacts for different use cases:
+
+### Core dependencies
+
+<CodeGroup>
+
+```toml Required
+# API definitions and annotations
+viaduct-api = { group = "com.airbnb.viaduct", name = "api", version.ref = "viaduct" }
+
+# Runtime implementation
+viaduct-runtime = { group = "com.airbnb.viaduct", name = "runtime", version.ref = "viaduct" }
+```
+
+```toml Optional
+# Bill of Materials (BOM) for dependency management
+viaduct-bom = { group = "com.airbnb.viaduct", name = "bom", version.ref = "viaduct" }
+
+# Test utilities and fixtures
+viaduct-test-fixtures = { group = "com.airbnb.viaduct", name = "test-fixtures", version.ref = "viaduct" }
+```
+
+</CodeGroup>
+
+- **viaduct-api**: Contains the core API definitions, annotations (`@Resolver`), and interfaces you'll use in your code
+- **viaduct-runtime**: Provides the runtime implementation of the Viaduct engine
+- **viaduct-bom**: Bill of Materials for managing dependency versions (optional but recommended)
+- **viaduct-test-fixtures**: Testing utilities for writing resolver tests (test dependency only)
+
+### Engine and service dependencies
+
+For advanced use cases or if you're building custom Viaduct integrations, you may need additional dependencies:
+
+```toml
+# Engine API (lower-level execution API)
+engine-api = { group = "com.airbnb.viaduct", name = "engine-api", version.ref = "viaduct" }
+engine-runtime = { group = "com.airbnb.viaduct", name = "engine-runtime", version.ref = "viaduct" }
+
+# Service API (higher-level service wrapper)
+service-api = { group = "com.airbnb.viaduct", name = "service-api", version.ref = "viaduct" }
+service-runtime = { group = "com.airbnb.viaduct", name = "service-runtime", version.ref = "viaduct" }
+```
+
+<Tip>
+  For most applications, you only need `viaduct-api` and `viaduct-runtime`. The engine and service modules are used internally by these artifacts.
+</Tip>
+
+## Configure plugin behavior
+
+The Viaduct plugins can be customized through DSL blocks:
+
+### Application plugin configuration
+
+```kotlin build.gradle.kts
+viaductApplication {
+    // Package prefix for your tenant modules
+    modulePackagePrefix.set("com.example.viadapp")
+    
+    // Optional: Configure additional settings
+    // schemaGenerationEnabled.set(true)
+}
+```
+
+The `modulePackagePrefix` tells Viaduct where to find your resolver classes. This should match your actual package structure.
+
+### Module plugin configuration
+
+```kotlin build.gradle.kts
+viaductModule {
+    // Package suffix for resolvers within the module
+    modulePackageSuffix.set("resolvers")
+    
+    // Optional: Specify which schemas this module uses
+    // compilationSchemas.add("schema1")
+}
+```
+
+The `modulePackageSuffix` defines where resolvers are located within the module. The full package path for resolvers will be `{modulePackagePrefix}.{modulePackageSuffix}`.
+
+## Multi-module projects
+
+For larger applications, you can structure your project as a multi-module Gradle build:
+
+```
+my-viaduct-app/
+├── build.gradle.kts              # Root project
+├── settings.gradle.kts
+├── app/
+│   └── build.gradle.kts          # Application module (apply viaduct.application)
+└── modules/
+    ├── users/
+    │   └── build.gradle.kts      # User module (apply viaduct.module)
+    └── products/
+        └── build.gradle.kts      # Product module (apply viaduct.module)
+```
+
+In a multi-module setup:
+- Apply `viaduct.application` plugin to the root or main application project
+- Apply `viaduct.module` plugin to each module that contains resolvers
+- Each module can have its own `src/main/viaduct/schema/` directory
+- Modules can depend on each other and share GRTs
+
+<Info>
+  The [Star Wars demo app](https://github.com/airbnb/viaduct/tree/main/demoapps/starwars) is a great example of a multi-module Viaduct application.
+</Info>
+
+## Verify installation
+
+Verify that your Viaduct installation is working:
+
+<Steps>
+  <Step title="Build the project">
+    Run the Gradle build:
+
+    ```bash
+    ./gradlew build
+    ```
+
+    The build should complete successfully, even if you haven't added any schema or resolvers yet.
+  </Step>
+
+  <Step title="Check generated code">
+    After creating a schema and running the build, check that Viaduct generated code:
+
+    ```bash
+    ls build/generated/source/viaduct/
+    ```
+
+    You should see generated resolver base classes and GRTs.
+  </Step>
+</Steps>
+
+## Next steps
+
+Now that you have Viaduct installed, you can:
+
+<CardGroup cols={2}>
+  <Card title="Define your schema" icon="file-code" href="/tutorials/schema">
+    Create GraphQL schemas with types and resolvers
+  </Card>
+  
+  <Card title="Write resolvers" icon="code" href="/tutorials/resolvers">
+    Implement business logic with resolver classes
+  </Card>
+  
+  <Card title="Run the dev server" icon="server" href="/development">
+    Start the development server with GraphiQL
+  </Card>
+  
+  <Card title="Explore examples" icon="stars" href="https://github.com/viaduct-dev">
+    Check out the demo applications for inspiration
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Plugin not found error">
+    If you see an error like "Plugin [id: 'com.airbnb.viaduct.application-gradle-plugin'] was not found":
+
+    1. Verify that Maven Central and Gradle Plugin Portal are configured in `pluginManagement`
+    2. Check that the Viaduct version in `gradle/viaduct.versions.toml` is valid
+    3. Try running with `--refresh-dependencies` flag: `./gradlew build --refresh-dependencies`
+  </Accordion>
+
+  <Accordion title="Code generation fails">
+    If code generation fails during the build:
+
+    1. Ensure both `viaduct.application` and `viaduct.module` plugins are applied
+    2. Verify that `modulePackagePrefix` matches your actual package structure
+    3. Check that your schema files are in `src/main/viaduct/schema/` and have `.graphqls` extension
+    4. Run with `--stacktrace` to see detailed error messages: `./gradlew build --stacktrace`
+  </Accordion>
+
+  <Accordion title="Incompatible Gradle/Kotlin versions">
+    If you see version compatibility errors:
+
+    1. Check the [Gradle-Kotlin compatibility matrix](https://docs.gradle.org/current/userguide/compatibility.html#kotlin)
+    2. Update your Kotlin version in `gradle/viaduct.versions.toml`
+    3. Ensure your Gradle wrapper version is compatible: `./gradlew wrapper --gradle-version 8.14`
+  </Accordion>
+
+  <Accordion title="Dependency resolution fails">
+    If dependencies can't be resolved:
+
+    1. Verify that `mavenCentral()` is configured in both `pluginManagement` and `dependencyResolutionManagement`
+    2. Try clearing the Gradle cache: `rm -rf ~/.gradle/caches/`
+    3. Run with `--refresh-dependencies`: `./gradlew build --refresh-dependencies`
+  </Accordion>
+</AccordionGroup>
+
+<Warning>
+  Make sure to check the [Maven Central page](https://central.sonatype.com/namespace/com.airbnb.viaduct) for the latest stable version of Viaduct. The version shown in this guide may not be the latest.
+</Warning>

@@ -1,0 +1,591 @@
+---
+title: Schema Change Management
+description: Best practices for evolving your GraphQL schema safely and managing breaking changes
+---
+
+Schema change management is critical for maintaining backward compatibility and ensuring smooth evolution of your GraphQL API. This guide covers strategies for making safe schema changes, handling deprecations, and managing schema versions in Viaduct.
+
+## Key Principles
+
+<CardGroup cols={2}>
+  <Card title="Backward Compatibility" icon="shield-check">
+    Any schema change must ensure backward compatibility unless explicitly intended otherwise.
+  </Card>
+  
+  <Card title="Additive Changes" icon="plus">
+    Adding new fields, types, or arguments is generally safe and non-breaking.
+  </Card>
+  
+  <Card title="Subtractive Changes" icon="minus">
+    Removing fields, types, or changing field types often breaks existing client operations.
+  </Card>
+  
+  <Card title="Validation First" icon="check">
+    Use automated validation and CI checks to detect breaking changes before deployment.
+  </Card>
+</CardGroup>
+
+## Hierarchy of Compatibility
+
+Schema changes fall into multiple categories based on their impact:
+
+### Safe Changes (Non-Breaking)
+
+These changes are safe and don't affect existing clients:
+
+```graphql
+# ✅ Adding new fields
+extend type User {
+  phoneNumber: String
+  preferences: UserPreferences
+}
+
+# ✅ Adding new types
+type UserPreferences {
+  theme: String
+  language: String
+}
+
+# ✅ Adding new optional arguments
+type Query {
+  users(limit: Int, offset: Int, filter: String): [User]  # Added 'filter'
+}
+
+# ✅ Making a non-null argument nullable
+type Query {
+  user(id: ID): User  # Changed from ID! to ID
+}
+
+# ✅ Adding new enum values (with caution)
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  DELETED
+  PENDING  # New value
+}
+
+# ✅ Making a field nullable
+type User {
+  bio: String  # Changed from String! to String
+}
+
+# ✅ Adding interfaces to existing types
+type User implements Node {
+  id: ID!
+  name: String
+}
+```
+
+### Breaking Changes (Wire-Compatible)
+
+These changes break client compilation but not runtime behavior:
+
+```graphql
+# ⚠️ Adding new enum values (compilation breaking)
+# Clients with exhaustive switch statements will fail to compile
+enum Status {
+  ACTIVE
+  INACTIVE
+  NEW_STATUS  # Breaks exhaustive switches
+}
+
+# ⚠️ Adding required arguments with defaults
+type Query {
+  users(limit: Int = 10, required: String!): [User]  # Added required arg
+}
+```
+
+### Breaking Changes (Wire-Breaking)
+
+These changes break both compilation and runtime:
+
+```graphql
+# ❌ Removing fields
+type User {
+  id: ID!
+  # name: String  <- REMOVED
+}
+
+# ❌ Renaming fields
+type User {
+  id: ID!
+  fullName: String  # Was 'name'
+}
+
+# ❌ Changing field types
+type User {
+  id: ID!
+  age: String  # Was Int
+}
+
+# ❌ Making a nullable field non-null
+type User {
+  email: String!  # Was String
+}
+
+# ❌ Removing enum values
+enum Status {
+  ACTIVE
+  # INACTIVE <- REMOVED
+}
+
+# ❌ Removing types
+# type OldType { ... }  <- REMOVED
+
+# ❌ Changing argument types
+type Query {
+  user(id: String!): User  # Was ID!
+}
+```
+
+## Schema Evolution Workflow
+
+### 1. Planning Changes
+
+Before making changes:
+
+1. Review existing client queries and mutations
+2. Identify potentially affected operations
+3. Determine if the change is breaking
+4. Plan migration strategy if needed
+
+### 2. Making Additive Changes
+
+Additive changes are straightforward:
+
+```graphql
+# Step 1: Add new field
+extend type User {
+  friends: [User] @resolver
+}
+
+# Step 2: Implement resolver
+@Resolver
+class UserFriendsResolver : UserResolvers.Friends() {
+    override suspend fun resolve(ctx: Context): List<User> {
+        // Implementation
+    }
+}
+
+# Step 3: Deploy
+# Clients can immediately start using the new field
+```
+
+### 3. Deprecating Fields
+
+When you need to remove or replace a field:
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  
+  # Step 1: Mark old field as deprecated
+  name: String @deprecated(reason: "Use firstName and lastName instead")
+  
+  # Step 2: Add replacement fields
+  firstName: String
+  lastName: String
+}
+```
+
+**Migration timeline:**
+
+1. **Week 0**: Deploy schema with new fields and deprecation
+2. **Week 1-4**: Monitor usage, notify clients, update documentation
+3. **Week 4-8**: Clients migrate to new fields
+4. **Week 8+**: Remove deprecated field once usage drops to zero
+
+### 4. Handling Breaking Changes
+
+When breaking changes are unavoidable:
+
+#### Option 1: Field Versioning
+
+```graphql
+type Listing @scope(to: ["viaduct:public"]) {
+  # Old field (deprecated)
+  price: String @deprecated(reason: "Use priceV2 for proper decimal support")
+  
+  # New field with correct type
+  priceV2: BigDecimal
+}
+```
+
+#### Option 2: Parallel Types
+
+```graphql
+# Legacy type
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  name: String
+}
+
+# New type with breaking changes
+type UserV2 @scope(to: ["viaduct:public"]) {
+  id: ID!
+  firstName: String!
+  lastName: String!
+  email: String!
+}
+
+type Query {
+  user(id: ID!): User @deprecated(reason: "Use userV2")
+  userV2(id: ID!): UserV2
+}
+```
+
+#### Option 3: Schema Scopes
+
+Use scopes to maintain multiple API versions:
+
+```graphql
+# Legacy API (v1 scope)
+type User @scope(to: ["api:v1"]) {
+  id: ID!
+  name: String
+}
+
+# New API (v2 scope)
+type User @scope(to: ["api:v2"]) {
+  id: ID!
+  firstName: String!
+  lastName: String!
+}
+```
+
+## Input Type Changes
+
+Input types have different compatibility rules:
+
+### Safe Input Changes
+
+```graphql
+# ✅ Adding optional fields
+input CreateUserInput {
+  name: String!
+  email: String!
+  phone: String  # New optional field
+}
+
+# ✅ Making required fields optional
+input UpdateUserInput {
+  name: String   # Was String!
+  email: String
+}
+```
+
+### Breaking Input Changes
+
+```graphql
+# ❌ Adding required fields
+input CreateUserInput {
+  name: String!
+  email: String!
+  requiredField: String!  # BREAKING
+}
+
+# ❌ Removing fields
+input CreateUserInput {
+  name: String!
+  # email: String!  <- REMOVED (BREAKING)
+}
+
+# ❌ Changing field types
+input CreateUserInput {
+  name: String!
+  age: String  # Was Int (BREAKING)
+}
+```
+
+## Validation and CI Integration
+
+Viaduct provides build-time validation for schema changes:
+
+### Build-Time Validation
+
+```kotlin
+// In your build.gradle.kts
+tasks.register("validateSchema") {
+    doLast {
+        // Viaduct validates schema at build time
+        // - Invalid scope names
+        // - Inaccessible fields
+        // - Invalid type references
+        // - Circular dependencies
+    }
+}
+```
+
+### CI Pipeline Example
+
+```yaml
+name: Schema Validation
+
+on: [pull_request]
+
+jobs:
+  validate-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      
+      - name: Build and Validate Schema
+        run: ./gradlew build validateSchema
+      
+      - name: Check for Breaking Changes
+        run: |
+          # Compare with main branch schema
+          # Fail if breaking changes detected
+          ./scripts/check-schema-compatibility.sh
+      
+      - name: Generate Schema Diff
+        run: |
+          # Generate human-readable diff
+          ./scripts/generate-schema-diff.sh
+```
+
+## Schema Freeze and Deprecation
+
+Fields being deprecated should:
+
+1. Be annotated with `@deprecated`
+2. Include a clear reason and migration path
+3. Remain in the schema until all clients migrate
+4. Be monitored for usage
+
+### Tracking Deprecation Usage
+
+```kotlin
+@Resolver
+class UserNameResolver : UserResolvers.Name() {
+    override suspend fun resolve(ctx: Context): String? {
+        // Log deprecated field usage
+        logger.warn("Deprecated field 'name' accessed by client: ${ctx.requestContext.clientId}")
+        
+        // Continue serving the field
+        return "${ctx.objectValue.getFirstName()} ${ctx.objectValue.getLastName()}"
+    }
+}
+```
+
+## Schema Modules and DAG Structure
+
+Viaduct organizes schemas into modules with a Directed Acyclic Graph (DAG) structure:
+
+### Module Dependencies
+
+```
+modules/
+  entity/           # Base types (User, Listing)
+    schema/
+      User.graphqls
+      Listing.graphqls
+  
+  data/             # Data operations (depends on entity)
+    schema/
+      Query.graphqls
+    build.gradle.kts  # dependencies: entity
+  
+  mutations/        # Mutations (depends on entity, data)
+    schema/
+      Mutation.graphqls
+    build.gradle.kts  # dependencies: entity, data
+```
+
+### Valid Module Structure
+
+```graphql
+# modules/entity/schema/User.graphqls
+type User @scope(to: ["viaduct"]) {
+  id: ID!
+  name: String
+}
+
+# modules/data/schema/Query.graphqls (depends on entity)
+extend type Query @scope(to: ["viaduct"]) {
+  user(id: ID!): User @resolver
+}
+```
+
+### Invalid Circular Dependencies
+
+```graphql
+# ❌ Module A references type from Module B
+# ❌ Module B references type from Module A
+# This creates a circular dependency and will fail validation
+```
+
+<Warning>
+  Ensure your schema modules follow a DAG structure with no circular dependencies. Viaduct validates this at build time.
+</Warning>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="1. Favor Additive Changes">
+    Always prefer adding new fields over modifying existing ones:
+    
+    ```graphql
+    # ✅ Good
+    type User {
+      name: String @deprecated(reason: "Use fullName")
+      fullName: String
+    }
+    
+    # ❌ Bad
+    type User {
+      fullName: String  # Changed from 'name'
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="2. Document All Changes">
+    Use clear descriptions and deprecation messages:
+    
+    ```graphql
+    type User {
+      "Deprecated: Use firstName and lastName instead. Will be removed after 2024-12-31."
+      name: String @deprecated(reason: "Split into firstName and lastName for i18n support")
+      
+      "User's given name"
+      firstName: String
+      
+      "User's family name"
+      lastName: String
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="3. Version Major Changes">
+    Use versioned fields or types for significant changes:
+    
+    ```graphql
+    type Query {
+      search(query: String!): [SearchResult] @deprecated(reason: "Use searchV2")
+      searchV2(input: SearchInputV2!): SearchResultsV2
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="4. Monitor Field Usage">
+    Track which fields are used and by whom:
+    
+    ```kotlin
+    @Resolver
+    class DeprecatedFieldResolver : UserResolvers.OldField() {
+        override suspend fun resolve(ctx: Context): String {
+            metrics.incrementDeprecatedFieldUsage(
+                field = "User.oldField",
+                client = ctx.requestContext.clientId
+            )
+            // ...
+        }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="5. Plan Removal Timeline">
+    Establish clear timelines for deprecation:
+    
+    1. Announce deprecation
+    2. Monitor usage (4-8 weeks)
+    3. Send removal warnings
+    4. Remove field once usage is zero
+  </Accordion>
+</AccordionGroup>
+
+## Example: Complete Schema Evolution
+
+### Phase 1: Initial Schema
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  name: String!
+  email: String!
+}
+```
+
+### Phase 2: Add New Fields (Non-Breaking)
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  name: String!
+  email: String!
+  
+  # New fields
+  avatar: String
+  bio: String
+}
+```
+
+### Phase 3: Deprecate and Replace (Breaking, Managed)
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  
+  # Deprecated
+  name: String! @deprecated(reason: "Use firstName and lastName")
+  
+  # Replacements
+  firstName: String!
+  lastName: String!
+  
+  email: String!
+  avatar: String
+  bio: String
+}
+```
+
+### Phase 4: Remove Deprecated Field
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  firstName: String!
+  lastName: String!
+  email: String!
+  avatar: String
+  bio: String
+}
+```
+
+## Common Pitfalls
+
+<Warning>
+  **Pitfall 1: Removing fields without deprecation**
+  
+  Always deprecate first and monitor usage before removing.
+</Warning>
+
+<Warning>
+  **Pitfall 2: Changing field types directly**
+  
+  Add a new field with the correct type and deprecate the old one.
+</Warning>
+
+<Warning>
+  **Pitfall 3: No client communication**
+  
+  Announce changes early and provide migration guides.
+</Warning>
+
+<Warning>
+  **Pitfall 4: No automated validation**
+  
+  Set up CI checks to catch breaking changes before deployment.
+</Warning>
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Schema Scopes" icon="eye" href="/advanced/scopes">
+    Use scopes to manage multiple API versions
+  </Card>
+  
+  <Card title="Field Classification" icon="layer-group" href="/advanced/field-classification">
+    Understanding field visibility and classification
+  </Card>
+</CardGroup>

@@ -1,0 +1,592 @@
+---
+title: Re-entrancy & Composable Queries
+description: How Viaduct enables modular composition through GraphQL fragments and subqueries
+---
+
+## What is Re-entrancy?
+
+Re-entrancy is the ability for logic hosted on Viaduct to compose with other logic hosted on Viaduct by issuing GraphQL fragments and queries. It's the key mechanism that enables modularity in large Viaduct applications.
+
+<Info>
+Instead of modules calling each other's code directly, they compose by issuing GraphQL fragments. This provides loose coupling while maintaining type safety and performance through automatic batching.
+</Info>
+
+## Why Re-entrancy Matters
+
+In traditional monolithic architectures, modules become tightly coupled through direct function calls:
+
+```kotlin Traditional Approach (Tight Coupling)
+class DisplayNameResolver(
+    private val userService: UserService  // Direct dependency!
+) {
+    fun resolve(userId: String): String {
+        val user = userService.getUser(userId)
+        return "${user.firstName} ${user.lastName.first()}."
+    }
+}
+```
+
+Problems with this approach:
+
+- **Tight coupling**: Changes to `UserService` affect all consumers
+- **No batching**: Each call to `getUser()` is independent
+- **Hard to test**: Must mock the entire `UserService`
+- **Monolith hazards**: Circular dependencies, version conflicts, build coupling
+
+Viaduct's re-entrant approach solves these issues:
+
+```kotlin Viaduct Approach (Loose Coupling via Fragments)
+@Resolver("""
+    fragment _ on User {
+        firstName
+        lastName
+    }
+""")
+class DisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        val first = ctx.objectValue.getFirstName()
+        val last = ctx.objectValue.getLastName()
+        return "$first ${last.first()}."
+    }
+}
+```
+
+Benefits:
+
+- **Loose coupling**: Only depends on schema, not code
+- **Automatic batching**: Engine batches all requests for `firstName` and `lastName`
+- **Type safety**: Generated code ensures fields exist
+- **Easy testing**: Mock GraphQL responses, not internal services
+
+<CardGroup cols={2}>
+  <Card title="Fragment-Based" icon="puzzle-piece">
+    Declare data needs as GraphQL fragments, not function calls
+  </Card>
+  
+  <Card title="Automatic Batching" icon="layer-group">
+    Engine automatically batches and deduplicates field requests
+  </Card>
+  
+  <Card title="Type-Safe" icon="shield">
+    Generated code enforces that requested fields exist in schema
+  </Card>
+  
+  <Card title="Testable" icon="vial">
+    Test resolvers in isolation with mocked GraphQL responses
+  </Card>
+</CardGroup>
+
+## Fragment-Based Data Requirements
+
+The `@Resolver` annotation declares what data your resolver needs using GraphQL fragments:
+
+### Object Value Fragments
+
+Request fields from the parent object:
+
+```kotlin
+@Resolver("""
+    fragment _ on Character {
+        name
+        birthYear
+    }
+""")
+class CharacterDisplaySummaryResolver : CharacterResolvers.DisplaySummary() {
+    override suspend fun resolve(ctx: Context): String {
+        val name = ctx.objectValue.getName()
+        val birthYear = ctx.objectValue.getBirthYear()
+        return "$name (born $birthYear)"
+    }
+}
+```
+
+The engine:
+
+1. Sees your fragment requesting `name` and `birthYear`
+2. Batches all requests for those fields across all resolver instances
+3. Invokes the resolvers for those fields once
+4. Makes results available via `ctx.objectValue`
+
+<Note>
+The fragment name (the `_` after `fragment`) is arbitrary. Viaduct only cares about the selection set inside the fragment.
+</Note>
+
+### Query Value Fragments
+
+Request fields from the root Query object:
+
+```kotlin
+@Resolver(
+    objectValueFragment = "fragment _ on Character { id }",
+    queryValueFragment = """
+        fragment _ on Query {
+            viewer {
+                user {
+                    id
+                }
+            }
+        }
+    """
+)
+class CharacterDisplayNameResolver : CharacterResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        val characterId = ctx.objectValue.getId()
+        val viewerId = ctx.queryValue.getViewer()?.getUser()?.getId()
+        
+        val suffix = if (characterId == viewerId) " (you!)" else ""
+        return ctx.objectValue.getName() + suffix
+    }
+}
+```
+
+<Warning>
+Only access fields declared in your fragments. Accessing undeclared fields throws `UnsetFieldException` at runtime.
+</Warning>
+
+### Shorthand Fragment Syntax
+
+For simple cases where you just delegate to another field:
+
+```kotlin
+@Resolver("name")  // Shorthand for: fragment _ on Character { name }
+class CharacterDisplayNameResolver : CharacterResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        return ctx.objectValue.getName()
+    }
+}
+```
+
+## Imperative Subqueries
+
+When your data needs aren't known until runtime, use imperative subqueries:
+
+### ctx.query()
+
+Execute a GraphQL query from within a resolver:
+
+```kotlin
+@Resolver("fragment _ on User { id firstName lastName }")
+class UserDisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        val id = ctx.objectValue.getId()
+        val fn = ctx.objectValue.getFirstName()
+        val ln = ctx.objectValue.getLastName()
+        
+        // Determine if user is the logged-in user
+        val query = ctx.query("{ viewer { user { id } } }")
+        val isViewer = id == query.getViewer()?.getUser()?.getId()
+        val suffix = if (isViewer) " (you!)" else ""
+        
+        return when {
+            fn == null && ln == null -> null
+            fn == null -> ln + suffix
+            ln == null -> fn + suffix
+            else -> "$fn $ln$suffix"
+        }
+    }
+}
+```
+
+### With Variables
+
+Pass variables to subqueries:
+
+```kotlin
+val query = ctx.query(
+    """{
+        listing(id: \$listingId) {
+            title
+            coverPhoto { url }
+        }
+    }""",
+    variables = mapOf("listingId" to listingId)
+)
+val title = query.getListing()?.getTitle()
+```
+
+<Tip>
+Subquery variables are scoped to the subquery. They don't inherit from the parent request's variables.
+</Tip>
+
+### ctx.mutation()
+
+Execute mutations from within mutation resolvers:
+
+```kotlin
+@Resolver
+class UpdateAndPublishResolver @Inject constructor(
+    val client: ListingServiceClient
+) : MutationResolvers.UpdateAndPublish() {
+    override suspend fun resolve(ctx: Context): Listing {
+        // Update via external service
+        client.update(ctx.arguments.input)
+        
+        // Publish via another mutation
+        val result = ctx.mutation(
+            "{ publishListing(id: \$id) { id title } }",
+            variables = mapOf("id" to ctx.arguments.id)
+        )
+        
+        return ctx.nodeFor(ctx.arguments.id)
+    }
+}
+```
+
+<Note>
+`ctx.mutation()` is only available in mutation resolver contexts. It executes top-level fields serially, matching standard GraphQL mutation semantics.
+</Note>
+
+## Choosing Between Fragments and Subqueries
+
+The core distinction is **when** the engine learns what data you need:
+
+| Approach | Planning Time | Use When |
+|----------|--------------|----------|
+| **@Resolver fragments** | Query planning | Data needs are known ahead of time |
+| **ctx.query()** | Runtime | Data needs depend on runtime values or conditional logic |
+
+### Fragment Benefits
+
+- Engine sees requirements at query planning time
+- Automatic batching across all resolver instances
+- Automatic deduplication of identical field requests
+- Better performance through parallel execution
+
+### Subquery Benefits
+
+- Runtime flexibility for conditional data loading
+- Ability to pass dynamic variables
+- Support for complex query logic
+
+<CodeGroup>
+```kotlin Use Fragments (Preferred)
+// Engine knows you need firstName and lastName upfront
+@Resolver("fragment _ on User { firstName lastName }")
+class DisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        return "${ctx.objectValue.getFirstName()} ${ctx.objectValue.getLastName()}"
+    }
+}
+```
+
+```kotlin Use Subqueries (When Needed)
+// Which fields to load depends on a runtime argument
+@Resolver
+class UserProfileResolver : UserResolvers.Profile() {
+    override suspend fun resolve(ctx: Context): String {
+        val includeDetails = ctx.arguments.includeDetails
+        
+        val query = if (includeDetails) {
+            ctx.query("{ user(id: \$id) { firstName lastName email phone } }",
+                variables = mapOf("id" to ctx.objectValue.getId()))
+        } else {
+            ctx.query("{ user(id: \$id) { firstName lastName } }",
+                variables = mapOf("id" to ctx.objectValue.getId()))
+        }
+        
+        // Build profile from query results
+    }
+}
+```
+</CodeGroup>
+
+## Real-World Example: Cross-Module Composition
+
+Let's see how two teams collaborate using re-entrancy:
+
+### Core User Team
+
+Defines base `User` type and resolvers:
+
+```graphql modules/users/schema/User.graphqls
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  email: String
+}
+```
+
+```kotlin modules/users/resolvers/UserNodeResolver.kt
+@Resolver
+class UserNodeResolver @Inject constructor(
+    private val userClient: UserServiceClient
+) : NodeResolvers.User() {
+    override suspend fun batchResolve(
+        contexts: List<Context>
+    ): List<FieldValue<User>> {
+        val userIds = contexts.map { it.id.internalID }
+        val users = userClient.fetchUsers(userIds)
+        
+        return contexts.map { ctx ->
+            users[ctx.id.internalID]?.let {
+                FieldValue.ofValue(UserBuilder(ctx).build(it))
+            } ?: FieldValue.ofError(NotFoundException())
+        }
+    }
+}
+```
+
+### Messaging Team
+
+Extends `User` type without depending on Core User's code:
+
+```graphql modules/messaging/schema/UserExtensions.graphqls
+extend type User {
+  displayName: String @resolver
+  unreadMessageCount: Int @resolver
+}
+```
+
+```kotlin modules/messaging/resolvers/UserDisplayNameResolver.kt
+@Resolver("""
+    fragment _ on User {
+        firstName
+        lastName
+    }
+""")
+class UserDisplayNameResolver @Inject constructor(
+) : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        val first = ctx.objectValue.getFirstName()
+        val last = ctx.objectValue.getLastName()
+        return "$first ${last?.first() ?: ""}."
+    }
+}
+```
+
+### What Happens at Runtime
+
+When a client queries:
+
+```graphql
+query {
+  user(id: "123") {
+    displayName
+  }
+}
+```
+
+<Steps>
+  <Step title="Query Planning">
+    Engine sees `displayName` requires a fragment on `User` requesting `firstName` and `lastName`
+  </Step>
+  
+  <Step title="Node Resolution">
+    Engine calls `UserNodeResolver` (Core User team) to load the User
+  </Step>
+  
+  <Step title="Field Resolution">
+    Engine batches requests for `firstName` and `lastName` and resolves them from the User data
+  </Step>
+  
+  <Step title="Computed Field">
+    Engine calls `UserDisplayNameResolver` (Messaging team) with `ctx.objectValue` populated
+  </Step>
+  
+  <Step title="Response">
+    Client receives: `{ "user": { "displayName": "John D." } }`
+  </Step>
+</Steps>
+
+<Info>
+The Messaging team never imported code from the Core User team. They composed purely through GraphQL fragments.
+</Info>
+
+## Batching and Performance
+
+Re-entrancy enables automatic batching that would be difficult to achieve with direct function calls:
+
+### Example: Batch Loading
+
+Suppose 100 characters each need their homeworld:
+
+```graphql
+query {
+  allCharacters {
+    name
+    homeworld { name }  # Each character needs this!
+  }
+}
+```
+
+Without batching (N+1 problem):
+
+```kotlin
+// Called 100 times, once per character
+fun resolveHomeworld(characterId: String): Planet {
+    return planetClient.getPlanet(characterId)  // 100 separate requests!
+}
+```
+
+With Viaduct's re-entrancy:
+
+```kotlin
+@Resolver("fragment _ on Character { homeworldId }")
+class CharacterHomeworldResolver @Inject constructor(
+    private val planetClient: PlanetClient
+) : CharacterResolvers.Homeworld() {
+    // Engine batches all 100 characters together
+    override suspend fun batchResolve(
+        contexts: List<Context>  // All 100 contexts at once!
+    ): List<FieldValue<Planet>> {
+        // Extract all homeworld IDs
+        val planetIds = contexts.map { 
+            it.objectValue.getHomeworldId() 
+        }
+        
+        // Single batch request for all planets
+        val planets = planetClient.getPlanets(planetIds)
+        
+        // Map results back to contexts
+        return contexts.map { ctx ->
+            val planetId = ctx.objectValue.getHomeworldId()
+            FieldValue.ofValue(planets[planetId]!!)
+        }
+    }
+}
+```
+
+The engine automatically:
+
+- Collects all 100 characters that need `homeworld`
+- Calls `batchResolve` once with all 100 contexts
+- Enables a single batch request to the planet service
+
+<Tip>
+This batching happens automatically. You don't need to set up data loaders or coordinate batch requests manually.
+</Tip>
+
+## Nested Subqueries
+
+Subqueries can issue their own subqueries, allowing deep composition:
+
+```kotlin
+@Resolver
+class RecommendationsResolver : QueryResolvers.Recommendations() {
+    override suspend fun resolve(ctx: Context): List<Listing> {
+        // Get user preferences via subquery
+        val prefs = ctx.query("""
+            {
+                viewer {
+                    user {
+                        preferences { preferredLocations }
+                    }
+                }
+            }
+        """)
+        
+        val locations = prefs.getViewer()?.getUser()
+            ?.getPreferences()?.getPreferredLocations() ?: emptyList()
+        
+        // Search listings via another subquery
+        val results = ctx.query(
+            "{ searchListings(locations: \$locs) { id title } }",
+            variables = mapOf("locs" to locations)
+        )
+        
+        return results.getSearchListings()
+    }
+}
+```
+
+All nested subqueries share:
+
+- Request-scoped state (authentication, tracing)
+- Data loaders and caching
+- Error accumulation
+- Execution context
+
+## Error Handling
+
+Subqueries maintain error isolation:
+
+```kotlin
+@Resolver
+class EnrichedDataResolver : UserResolvers.EnrichedData() {
+    override suspend fun resolve(ctx: Context): String {
+        return try {
+            val result = ctx.query("{ externalAPI { data } }")
+            result.getExternalAPI()?.getData() ?: "No data"
+        } catch (e: SubqueryExecutionException) {
+            // Subquery failed, return fallback
+            "Data unavailable"
+        }
+    }
+}
+```
+
+Common exceptions:
+
+- `UnsetFieldException`: Accessed a field not in the selection set
+- `SubqueryExecutionException`: Subquery failed to execute
+- Field resolution errors: Flow into the result's error list
+
+## Testing Re-entrant Resolvers
+
+Test resolvers in isolation by mocking GraphQL responses:
+
+```kotlin
+class DisplayNameResolverTest {
+    @Test
+    fun `formats name correctly`() = runBlocking {
+        val mockContext = mockk<Context> {
+            coEvery { objectValue.getFirstName() } returns "Luke"
+            coEvery { objectValue.getLastName() } returns "Skywalker"
+        }
+        
+        val resolver = UserDisplayNameResolver()
+        val result = resolver.resolve(mockContext)
+        
+        assertThat(result).isEqualTo("Luke S.")
+    }
+}
+```
+
+No need to mock entire services - just mock the GraphQL data your resolver needs.
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Prefer Fragments" icon="puzzle-piece">
+    Use @Resolver fragments when data needs are known upfront
+  </Card>
+  
+  <Card title="Batch Everything" icon="layer-group">
+    Implement batchResolve for better performance
+  </Card>
+  
+  <Card title="Declare Dependencies" icon="file-code">
+    Make data requirements explicit in fragments
+  </Card>
+  
+  <Card title="Test in Isolation" icon="vial">
+    Mock GraphQL responses, not internal services
+  </Card>
+</CardGroup>
+
+### Do's and Don'ts
+
+<CodeGroup>
+```text Do
+✓ Declare data needs in @Resolver fragments
+✓ Implement batchResolve for fields accessed by multiple parents
+✓ Use ctx.query() when data needs are conditional
+✓ Let the engine handle batching and deduplication
+✓ Test resolvers by mocking GraphQL responses
+```
+
+```text Don't
+✗ Import resolver code from other modules
+✗ Access fields not declared in your fragment
+✗ Use ctx.query() when a fragment would work
+✗ Manually implement batching or caching
+✗ Create circular module dependencies
+```
+</CodeGroup>
+
+## See Also
+
+- [Tenant Modules](/concepts/tenant-modules) - Building modular applications
+- [Generated Code](/concepts/generated-code) - Understanding GRTs and type-safe access
+- [Central Schema](/concepts/central-schema) - How modules contribute to one schema

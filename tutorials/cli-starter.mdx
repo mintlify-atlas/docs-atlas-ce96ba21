@@ -1,0 +1,200 @@
+---
+title: 'CLI Starter Tutorial'
+description: 'Build a simple command-line GraphQL application with Viaduct'
+icon: 'terminal'
+---
+
+## Overview
+
+The CLI Starter demonstrates the simplest possible Viaduct application. It executes GraphQL queries from the command line and prints the results. This tutorial is perfect for understanding the core concepts of Viaduct without the complexity of HTTP servers.
+
+## What You'll Learn
+
+- How to create a Viaduct instance using `BasicViaductFactory`
+- How to define GraphQL schema and resolvers
+- How to execute GraphQL queries programmatically
+- Understanding Viaduct's module-based architecture
+
+## Prerequisites
+
+- Java JDK 21 installed
+- `JAVA_HOME` environment variable set correctly or `java` in your PATH
+
+## Project Structure
+
+```
+cli-starter/
+├── src/main/
+│   ├── kotlin/com/example/
+│   │   ├── viadapp/
+│   │   │   └── ViaductApplication.kt    # Main application
+│   │   └── resolvers/
+│   │       └── HelloWorldResolvers.kt   # Resolver implementations
+│   └── viaduct/schema/
+│       └── schema.graphqls              # GraphQL schema definition
+└── build.gradle.kts
+```
+
+<Steps>
+
+### Define the GraphQL Schema
+
+First, define your GraphQL schema in `src/main/viaduct/schema/schema.graphqls`:
+
+```graphql
+extend type Query {
+  greeting: String @resolver
+  author: String @resolver
+}
+```
+
+The `@resolver` directive tells Viaduct to look for resolver implementations for these fields.
+
+### Implement the Resolvers
+
+Create resolver classes in `src/main/kotlin/com/example/viadapp/resolvers/HelloWorldResolvers.kt`:
+
+```kotlin
+package com.example.viadapp.resolvers
+
+import com.example.viadapp.resolvers.resolverbases.QueryResolvers
+import viaduct.api.Resolver
+
+@Resolver
+class GreetingResolver : QueryResolvers.Greeting() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Hello, World!"
+    }
+}
+
+@Resolver
+class AuthorResolver : QueryResolvers.Author() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Brian Kernighan"
+    }
+}
+```
+
+**Key Points:**
+- Each resolver is annotated with `@Resolver`
+- Resolvers extend generated base classes (e.g., `QueryResolvers.Greeting()`)
+- The `resolve` method is suspendable, supporting Kotlin coroutines
+- Viaduct automatically discovers resolvers in your tenant package
+
+### Create the Main Application
+
+Set up the Viaduct instance and execute queries in `src/main/kotlin/com/example/viadapp/ViaductApplication.kt`:
+
+```kotlin
+package com.example.viadapp
+
+import com.fasterxml.jackson.databind.ObjectMapper
+import kotlinx.coroutines.runBlocking
+import viaduct.service.BasicViaductFactory
+import viaduct.service.TenantRegistrationInfo
+import viaduct.service.api.ExecutionInput
+
+fun main(argv: Array<String>) {
+    // Create a Viaduct engine using BasicViaductFactory
+    val viaduct = BasicViaductFactory.create(
+        tenantRegistrationInfo = TenantRegistrationInfo(
+            tenantPackagePrefix = "com.example.viadapp"
+        )
+    )
+
+    // Create an execution input with query from args or default
+    val executionInput = ExecutionInput.create(
+        operationText = argv.getOrNull(0) ?: """
+            query {
+                greeting
+            }
+        """.trimIndent(),
+        variables = emptyMap(),
+    )
+
+    // Execute the query
+    val result = runBlocking {
+        viaduct.execute(executionInput)
+    }
+
+    // Print the result in JSON format
+    val mapper = ObjectMapper().writerWithDefaultPrettyPrinter()
+    println(mapper.writeValueAsString(result.toSpecification()))
+}
+```
+
+**Key Concepts:**
+- `BasicViaductFactory.create()` automatically discovers schemas and resolvers
+- `tenantPackagePrefix` tells Viaduct where to find your resolver classes
+- `ExecutionInput.create()` builds the query execution context
+- `viaduct.execute()` runs the query and returns results
+- `result.toSpecification()` converts to standard GraphQL JSON format
+
+### Run the Application
+
+Execute the default query:
+
+```bash
+./gradlew -q run
+```
+
+**Expected Output:**
+```json
+{
+  "data" : {
+    "greeting" : "Hello, World!"
+  }
+}
+```
+
+### Run Custom Queries
+
+Pass a custom GraphQL query as an argument:
+
+```bash
+./gradlew -q run --args="'{ author }'"
+```
+
+**Expected Output:**
+```json
+{
+  "data" : {
+    "author" : "Brian Kernighan"
+  }
+}
+```
+
+Query multiple fields:
+
+```bash
+./gradlew -q run --args="'{ greeting author }'"
+```
+
+**Expected Output:**
+```json
+{
+  "data" : {
+    "greeting" : "Hello, World!",
+    "author" : "Brian Kernighan"
+  }
+}
+```
+
+</Steps>
+
+## How It Works
+
+1. **Schema Generation**: Viaduct scans `src/main/viaduct/schema/` for `.graphqls` files
+2. **Code Generation**: During compilation, Viaduct generates resolver base classes from your schema
+3. **Resolver Discovery**: At runtime, Viaduct discovers all `@Resolver` annotated classes in your tenant package
+4. **Query Execution**: When you call `viaduct.execute()`, it:
+   - Parses the GraphQL query
+   - Validates it against the schema
+   - Executes the appropriate resolvers
+   - Returns the result in GraphQL specification format
+
+## Next Steps
+
+- Explore the [Jetty Starter Tutorial](/tutorials/jetty-starter) to learn how to serve GraphQL over HTTP
+- Check out the [Star Wars Tutorial](/tutorials/starwars) for a comprehensive example with complex data models
+- Read the [Getting Started Guide](/quickstart) for more details on Viaduct concepts

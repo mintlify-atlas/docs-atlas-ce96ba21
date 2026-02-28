@@ -1,0 +1,448 @@
+---
+title: Development Server
+description: Use the serve task with auto-reload for rapid development
+---
+
+## Overview
+
+The `serve` task provides a development server for Viaduct applications with built-in GraphiQL IDE and automatic code reloading. This is the fastest way to iterate during development.
+
+## Features
+
+- **GraphiQL IDE**: Interactive GraphQL explorer in your browser
+- **Auto-reloading**: Automatic rebuild and restart when code changes
+- **Zero configuration**: Works out-of-the-box for simple applications
+- **Hot reload**: Changes reflected immediately without manual restart
+
+## Prerequisites
+
+The `serve` task is automatically available in any project that applies the Viaduct application plugin:
+
+```kotlin
+plugins {
+    id("com.airbnb.viaduct.application-gradle-plugin")
+}
+```
+
+## Quick Start
+
+### Start with Auto-Reload (Recommended)
+
+Start the development server with automatic reloading:
+
+```shell
+./gradlew --continuous serve
+```
+
+This is the recommended way to run during development. When you change source files:
+
+1. Gradle detects the change
+2. Rebuilds the affected code
+3. Restarts the server automatically
+
+The server provides:
+
+- **GraphQL endpoint**: `http://localhost:8080/graphql`
+- **GraphiQL IDE**: `http://localhost:8080/graphiql`
+- **Health check**: `http://localhost:8080/health`
+
+Press `Ctrl+C` to stop.
+
+### Start Without Auto-Reload
+
+If you need to run the server without auto-reloading:
+
+```shell
+./gradlew serve
+```
+
+Note: In this mode, you must manually stop and restart the server after making changes.
+
+## Configuration
+
+### In build.gradle.kts (Recommended)
+
+Configure serve settings using the `viaductApplication` extension:
+
+```kotlin
+viaductApplication {
+    modulePackagePrefix.set("com.example.app")  // Used for resolver discovery
+    servePort.set(3000)                         // Default: 8080
+    serveHost.set("127.0.0.1")                  // Default: 0.0.0.0
+}
+```
+
+**Configuration options:**
+- `modulePackagePrefix`: Package prefix for discovering your resolvers (used in default mode)
+- `servePort`: Port for the development server (default: 8080)
+- `serveHost`: Host to bind to (default: 0.0.0.0, accessible from any interface)
+
+### Using Gradle Properties (Override)
+
+You can override these settings at runtime:
+
+```shell
+./gradlew --continuous serve -Pserve.port=3000 -Pserve.host=127.0.0.1
+```
+
+Or set them in your `gradle.properties` file:
+
+```properties
+serve.port=3000
+serve.host=127.0.0.1
+```
+
+Property overrides take precedence over extension settings.
+
+## Dependency Injection
+
+### Using @ViaductServerConfiguration
+
+To enable dependency injection in your resolvers, create a class annotated with `@ViaductServerConfiguration` that implements `ViaductFactory`:
+
+```kotlin
+import viaduct.serve.ViaductServerConfiguration
+import viaduct.serve.ViaductFactory
+import viaduct.service.api.Viaduct
+
+@ViaductServerConfiguration
+class MyViaductFactory : ViaductFactory {
+    override fun mkViaduct(): Viaduct {
+        // Return your Viaduct instance configured with DI
+        return myDiFramework.getBean(Viaduct::class.java)
+    }
+}
+```
+
+The serve server automatically discovers your implementation via classpath scanning.
+
+### Example: Micronaut Integration
+
+```kotlin
+import io.micronaut.context.ApplicationContext
+import viaduct.serve.ViaductServerConfiguration
+import viaduct.serve.ViaductFactory
+import viaduct.service.api.Viaduct
+
+@ViaductServerConfiguration
+class MicronautViaductFactory : ViaductFactory {
+    override fun mkViaduct(): Viaduct {
+        val context = ApplicationContext.builder()
+            .packages(
+                "com.example.app.injector",
+                "com.example.app.resolvers"
+            )
+            .start()
+        return context.getBean(Viaduct::class.java)
+    }
+}
+```
+
+### Example: Manual Configuration
+
+```kotlin
+import viaduct.serve.ViaductServerConfiguration
+import viaduct.serve.ViaductFactory
+import viaduct.service.BasicViaductFactory
+import viaduct.service.TenantRegistrationInfo
+
+@ViaductServerConfiguration
+class MyViaductFactory : ViaductFactory {
+    override fun mkViaduct(): Viaduct {
+        return BasicViaductFactory.create(
+            tenantRegistrationInfo = TenantRegistrationInfo(
+                tenantPackagePrefix = "com.example.app"
+            )
+        )
+    }
+}
+```
+
+### Without @ViaductServerConfiguration (Default Mode)
+
+If no `@ViaductServerConfiguration` annotated class is found, the serve server falls back to default mode using `viaductApplication.modulePackagePrefix` from your build configuration.
+
+**Limitations in default mode:**
+- Dependency injection is NOT available
+- Only `@Resolver` classes with zero-argument constructors work
+- Resolvers requiring injected dependencies will fail
+
+You will see this warning when running in default mode:
+
+```
+╔════════════════════════════════════════════════════════════════════════════╗
+║  NO @ViaductServerConfiguration FOUND - USING DEFAULT FACTORY             ║
+╠════════════════════════════════════════════════════════════════════════════╣
+║  DEPENDENCY INJECTION IS NOT AVAILABLE IN THIS MODE                        ║
+║                                                                            ║
+║  Only @Resolver classes with zero-argument constructors will work.        ║
+║  If your resolvers require injected dependencies, they will fail.         ║
+║                                                                            ║
+║  To enable DI, create a class annotated with @ViaductServerConfiguration  ║
+║  that implements ViaductFactory and returns your Viaduct instance.       ║
+╚════════════════════════════════════════════════════════════════════════════╝
+```
+
+**Recommendation**: If your resolvers have any dependencies, create a `@ViaductServerConfiguration` class.
+
+## Development Workflow
+
+### Recommended Workflow
+
+1. Start the server in continuous mode:
+   ```shell
+   ./gradlew --continuous serve
+   ```
+
+2. Open GraphiQL in your browser: `http://localhost:8080/graphiql`
+
+3. Make changes to your schema or resolvers:
+   ```graphql
+   # Add a new field to Character.graphqls
+   type Character {
+     # ... existing fields ...
+     nickname: String
+   }
+   ```
+
+4. Gradle automatically detects the change, rebuilds, and restarts the server
+
+5. Refresh GraphiQL to see the new field in the schema
+
+### What Gets Watched
+
+Continuous mode watches:
+
+- **GraphQL schema files** (`.graphqls`) in all modules
+- **Kotlin source files** in `src/main/kotlin`
+- **Resource files** referenced by the application
+- **Build configuration** (when relevant)
+
+## Using GraphiQL
+
+GraphiQL provides an interactive environment for exploring and testing your GraphQL API.
+
+### Accessing GraphiQL
+
+Open your browser to:
+
+```
+http://localhost:8080/graphiql
+```
+
+(Or use the port you configured)
+
+### Features
+
+- **Query Editor**: Write and execute GraphQL queries with syntax highlighting
+- **Schema Documentation**: Browse your schema's types, fields, and descriptions
+- **Auto-completion**: Get suggestions as you type queries
+- **Query History**: Access previously executed queries
+- **Variables Panel**: Test queries with different variable values
+- **Response Viewer**: Formatted JSON response display
+
+### Example Query
+
+Try this query in GraphiQL:
+
+```graphql
+query GetCharacters {
+  allCharacters(limit: 5) {
+    name
+    birthYear
+    homeworld {
+      name
+      climate
+    }
+  }
+}
+```
+
+### Testing with Variables
+
+Use the variables panel to test queries with parameters:
+
+**Query:**
+```graphql
+query GetCharacter($id: ID!) {
+  character(id: $id) {
+    name
+    birthYear
+    species {
+      name
+      classification
+    }
+  }
+}
+```
+
+**Variables:**
+```json
+{
+  "id": "1"
+}
+```
+
+### Testing Mutations
+
+```graphql
+mutation CreateCharacter($input: CreateCharacterInput!) {
+  createCharacter(input: $input) {
+    id
+    name
+    homeworld {
+      name
+    }
+  }
+}
+```
+
+**Variables:**
+```json
+{
+  "input": {
+    "name": "New Character",
+    "homeworldId": "1"
+  }
+}
+```
+
+## Troubleshooting
+
+### Port Already in Use
+
+If port 8080 is already in use:
+
+**Option 1**: Stop the process using the port
+```shell
+# Find the process
+lsof -i :8080
+# Kill it
+kill -9 <PID>
+```
+
+**Option 2**: Use a different port
+```shell
+./gradlew --continuous serve -Pserve.port=3000
+```
+
+### Server Not Restarting in Continuous Mode
+
+If the server doesn't restart after changes:
+
+1. **Check you're using `--continuous` flag**
+   ```shell
+   ./gradlew --continuous serve  # Correct
+   ./gradlew serve              # Won't auto-reload
+   ```
+
+2. **Verify your changes are in watched files**
+   - Schema files (`.graphqls`)
+   - Kotlin source files (`src/main/kotlin`)
+   - Not configuration files outside the project
+
+3. **Check Gradle output for compilation errors**
+   - Look for error messages in the terminal
+   - Fix any compilation errors
+
+4. **Try stopping and restarting**
+   - Press `Ctrl+C` to stop
+   - Run `./gradlew --continuous serve` again
+
+### Changes Not Reflected in GraphiQL
+
+If code changes don't appear:
+
+1. **Hard refresh your browser**
+   - Mac: `Cmd+Shift+R`
+   - Windows/Linux: `Ctrl+Shift+F5`
+
+2. **Check the Gradle output**
+   - Look for "Starting Viaduct Development Server..." in logs
+   - Verify the server actually restarted
+
+3. **Clear browser cache**
+   - GraphiQL may cache schema information
+
+### Resolver Instantiation Errors
+
+If you see errors about resolvers failing to instantiate:
+
+```
+Failed to instantiate resolver: com.example.UserResolver
+```
+
+**Cause**: Your resolver has constructor parameters (dependencies)
+
+**Solution**: Create a `@ViaductServerConfiguration` class to enable DI:
+
+```kotlin
+@ViaductServerConfiguration
+class MyViaductFactory : ViaductFactory {
+    override fun mkViaduct(): Viaduct {
+        // Configure your DI framework here
+        return BasicViaductFactory.create(
+            tenantRegistrationInfo = TenantRegistrationInfo(
+                tenantPackagePrefix = "com.example.app",
+                tenantCodeInjector = myDIFrameworkInjector
+            )
+        )
+    }
+}
+```
+
+### Package Prefix Not Found
+
+If you see:
+
+```
+No @ViaductServerConfiguration found and no packagePrefix configured.
+```
+
+**Solution**: Set `modulePackagePrefix` in your `build.gradle.kts`:
+
+```kotlin
+viaductApplication {
+    modulePackagePrefix.set("com.example.app")
+}
+```
+
+## Comparison with Production
+
+The `serve` task is for development only. Key differences from production:
+
+| Feature | Development Server | Production |
+|---------|-------------------|------------|
+| HTTP Server | Built-in Jetty | Your choice (Jetty, Ktor, etc.) |
+| Configuration | Minimal/automatic | Full control |
+| Authentication | None | Custom implementation |
+| Authorization | None | Custom implementation |
+| Error Handling | Basic | Production-grade |
+| Monitoring | None | Metrics, logging, tracing |
+| Performance | Development mode | Optimized |
+| Scalability | Single instance | Load balanced |
+| Auto-reload | Yes | No |
+| GraphiQL | Included | Optional |
+
+For production deployments:
+- Configure your actual HTTP server (Ktor, Jetty, etc.)
+- Set up proper authentication and authorization
+- Configure production logging and monitoring
+- Review the [Production Deployment](production) documentation
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embedding Viaduct" icon="code" href="embedding-viaduct">
+    Learn how to integrate Viaduct into your HTTP server
+  </Card>
+  <Card title="Production Deployment" icon="server" href="production">
+    Production considerations and best practices
+  </Card>
+  <Card title="Testing" icon="flask" href="/docs/developers/testing">
+    Learn how to test your Viaduct application
+  </Card>
+  <Card title="Resolvers" icon="puzzle-piece" href="/docs/developers/resolvers">
+    Write business logic in resolvers
+  </Card>
+</CardGroup>

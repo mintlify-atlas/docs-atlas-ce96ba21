@@ -1,0 +1,589 @@
+---
+title: Pagination
+description: Implementing Relay connections, cursors, and PageInfo in Viaduct
+---
+
+Viaduct implements the [Relay Connection specification](https://relay.dev/graphql/connections.htm) for cursor-based pagination, providing a standardized approach to paginating large datasets.
+
+## Why Relay Connections?
+
+<CardGroup cols={2}>
+  <Card title="Cursor-based" icon="bookmark">
+    More stable than offset pagination when data changes between requests
+  </Card>
+  <Card title="Bidirectional" icon="arrows-left-right">
+    Supports both forward (`first`/`after`) and backward (`last`/`before`) traversal
+  </Card>
+  <Card title="Standardized" icon="check">
+    Well-understood pattern across the GraphQL ecosystem
+  </Card>
+  <Card title="Rich Metadata" icon="info">
+    Provides `PageInfo` for building pagination controls
+  </Card>
+</CardGroup>
+
+## Defining Connections
+
+### Schema Setup
+
+Define connection and edge types with `@connection` and `@edge` directives:
+
+```graphql title="schema/User.graphqls"
+type User implements Node {
+  id: ID!
+  name: String!
+  
+  # Paginated list of posts
+  posts(first: Int, after: String): PostConnection! @resolver
+  followers(first: Int, after: String): UserConnection! @resolver
+}
+
+type UserConnection @connection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int  # Optional
+}
+
+type UserEdge @edge {
+  node: User!
+  cursor: String!
+  followedAt: DateTime  # Optional edge metadata
+}
+```
+
+<Note>
+  **Connection requirements:**
+  - Name must end with `Connection`
+  - Must have `edges: [<EdgeType>!]!` field
+  - Must have `pageInfo: PageInfo!` field
+  - Use `@connection` directive
+</Note>
+
+<Note>
+  **Edge requirements:**
+  - Name must end with `Edge`
+  - Must have `node` field (any type except list)
+  - Must have `cursor: String!` field
+  - Use `@edge` directive
+</Note>
+
+### Pagination Arguments
+
+Add pagination arguments to fields returning connections:
+
+```graphql
+extend type Query {
+  # Forward pagination
+  users(first: Int, after: String): UserConnection! @resolver
+  
+  # Backward pagination
+  recentUsers(last: Int, before: String): UserConnection! @resolver
+  
+  # Bidirectional pagination
+  allUsers(
+    first: Int
+    after: String
+    last: Int
+    before: String
+  ): UserConnection! @resolver
+}
+```
+
+<ParamField path="first" type="Int">
+  Number of items to fetch from the start (forward pagination)
+</ParamField>
+
+<ParamField path="after" type="String">
+  Cursor to start after (exclusive) - fetch items after this cursor
+</ParamField>
+
+<ParamField path="last" type="Int">
+  Number of items to fetch from the end (backward pagination)
+</ParamField>
+
+<ParamField path="before" type="String">
+  Cursor to end before (exclusive) - fetch items before this cursor
+</ParamField>
+
+## PageInfo
+
+PageInfo provides metadata about the current page:
+
+```graphql
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+```
+
+<Tip>
+  Viaduct automatically creates the `PageInfo` type if it doesn't exist in your schema. You can also define it explicitly, but it must conform exactly to the Relay specification.
+</Tip>
+
+## Building Connections
+
+Viaduct provides three builder methods for different pagination scenarios:
+
+### fromSlice() - Offset/Limit Backends
+
+Best for backends using offset/limit pagination:
+
+```kotlin
+import com.example.myapp.resolverbases.QueryResolvers
+import jakarta.inject.Inject
+import viaduct.api.Resolver
+import viaduct.api.grts.UserConnection
+
+@Resolver
+class UsersQueryResolver @Inject constructor(
+    private val userService: UserService
+) : QueryResolvers.Users() {
+    override suspend fun resolve(ctx: Context): UserConnection {
+        // Convert cursor arguments to offset/limit
+        val (offset, limit) = ctx.arguments.toOffsetLimit()
+        
+        // Fetch limit + 1 to check if there are more results
+        val users = userService.getUsers(
+            offset = offset,
+            limit = limit + 1
+        )
+        
+        // Build connection from slice
+        return UserConnection.Builder(ctx)
+            .fromSlice(
+                items = users,
+                hasNextPage = users.size > limit
+            ) { user ->
+                // Map each item to a node reference
+                ctx.nodeFor(user.id)
+            }
+            .build()
+    }
+}
+```
+
+<Tip>
+  **Fetch limit + 1** to efficiently determine if there are more pages without a separate count query.
+</Tip>
+
+### fromEdges() - Native Cursor Backends
+
+Best for backends that natively support cursor-based pagination:
+
+```kotlin
+@Resolver
+class UserFollowersResolver @Inject constructor(
+    private val followerService: FollowerService
+) : UserResolvers.Followers() {
+    override suspend fun resolve(ctx: Context): UserConnection {
+        val userId = ctx.objectValue.getId().internalID
+        
+        // Backend returns cursors directly
+        val response = followerService.getFollowers(
+            userId = userId,
+            cursor = ctx.arguments.after,
+            limit = ctx.arguments.first ?: 20
+        )
+        
+        return UserConnection.Builder(ctx)
+            .fromEdges(
+                edges = response.followers.map { follower ->
+                    UserEdge.Builder(ctx)
+                        .node(ctx.nodeFor(follower.userId))
+                        .cursor(follower.cursor)
+                        .followedAt(follower.followedAt)
+                        .build()
+                },
+                hasNextPage = response.hasMore,
+                hasPreviousPage = response.hasPrevious
+            )
+            .build()
+    }
+}
+```
+
+### fromList() - Full Dataset
+
+Best when you have the complete dataset in memory:
+
+```kotlin
+@Resolver
+class UserPostsResolver @Inject constructor(
+    private val postService: PostService
+) : UserResolvers.Posts() {
+    override suspend fun resolve(ctx: Context): PostConnection {
+        val userId = ctx.objectValue.getId().internalID
+        
+        // Fetch all posts for this user
+        val posts = postService.getUserPosts(userId)
+        
+        // Viaduct handles slicing based on arguments
+        return PostConnection.Builder(ctx)
+            .fromList(posts) { post ->
+                ctx.nodeFor(post.id)
+            }
+            .build()
+    }
+}
+```
+
+<Warning>
+  `fromList()` should only be used for small datasets that fit comfortably in memory.
+</Warning>
+
+## Converting Arguments
+
+Use `toOffsetLimit()` to convert cursor arguments to offset/limit:
+
+```kotlin
+val (offset, limit) = ctx.arguments.toOffsetLimit()
+
+// Default limit is used if 'first' is not provided
+val (offset, limit) = ctx.arguments.toOffsetLimit(defaultLimit = 20)
+```
+
+**Valid argument combinations:**
+
+| Arguments | Result |
+|-----------|--------|
+| None | First page with default limit |
+| `first: 10` | First 10 items |
+| `first: 10, after: "cursor"` | 10 items after cursor |
+| `after: "cursor"` only | Default limit after cursor |
+| `last: 10, before: "cursor"` | Last 10 items before cursor |
+
+### Backward Pagination with Total Count
+
+When using `last` without `before`, you need the total count:
+
+```kotlin
+if (ctx.arguments.requiresTotalCountForOffsetLimit()) {
+    val totalCount = userService.getUserCount()
+    val (offset, limit) = ctx.arguments.toOffsetLimit(totalCount)
+}
+```
+
+## Adding Custom Fields
+
+### Edge Metadata
+
+Add extra fields to edges:
+
+```graphql
+type FollowerEdge @edge {
+  node: User!
+  cursor: String!
+  
+  # Custom edge fields
+  followedAt: DateTime!
+  notificationsEnabled: Boolean!
+}
+```
+
+```kotlin
+UserEdge.Builder(ctx)
+    .node(ctx.nodeFor(followerId))
+    .cursor(cursor)
+    .followedAt(follower.createdAt)
+    .notificationsEnabled(follower.notifications)
+    .build()
+```
+
+### Connection Metadata
+
+Add extra fields to connections:
+
+```graphql
+type PostConnection @connection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+  
+  # Custom connection fields
+  totalCount: Int!
+  publishedCount: Int!
+}
+```
+
+```kotlin
+PostConnection.Builder(ctx)
+    .fromSlice(posts, hasNextPage = hasMore) { ctx.nodeFor(it.id) }
+    .totalCount(response.total)
+    .publishedCount(response.published)
+    .build()
+```
+
+## Filtering and Sorting
+
+Combine pagination with filters:
+
+```graphql
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+enum PostSortOrder {
+  CREATED_AT_ASC
+  CREATED_AT_DESC
+  TITLE_ASC
+}
+
+extend type Query {
+  posts(
+    first: Int
+    after: String
+    status: PostStatus
+    sortBy: PostSortOrder = CREATED_AT_DESC
+  ): PostConnection! @resolver
+}
+```
+
+```kotlin
+@Resolver
+class PostsQueryResolver @Inject constructor(
+    private val postService: PostService
+) : QueryResolvers.Posts() {
+    override suspend fun resolve(ctx: Context): PostConnection {
+        val (offset, limit) = ctx.arguments.toOffsetLimit()
+        
+        val posts = postService.getPosts(
+            offset = offset,
+            limit = limit + 1,
+            status = ctx.arguments.status,
+            sortOrder = ctx.arguments.sortBy
+        )
+        
+        return PostConnection.Builder(ctx)
+            .fromSlice(
+                items = posts,
+                hasNextPage = posts.size > limit
+            ) { post ->
+                ctx.nodeFor(post.id)
+            }
+            .build()
+    }
+}
+```
+
+## Real-World Examples
+
+<CodeGroup>
+```kotlin Simple List
+@Resolver
+class AllCharactersResolver @Inject constructor(
+    private val characterRepository: CharacterRepository
+) : QueryResolvers.AllCharacters() {
+    override suspend fun resolve(ctx: Context): List<Character> {
+        val limit = ctx.arguments.limit ?: 20
+        val characters = characterRepository.findAll(limit)
+        
+        return characters.map { character ->
+            ctx.nodeFor(character.id)
+        }
+    }
+}
+```
+
+```kotlin Offset Pagination
+@Resolver
+class OrganizationMembersResolver @Inject constructor(
+    private val memberService: MemberService
+) : OrganizationResolvers.Members() {
+    override suspend fun resolve(ctx: Context): MemberConnection {
+        val orgId = ctx.objectValue.getId().internalID
+        val (offset, limit) = ctx.arguments.toOffsetLimit()
+        
+        val response = memberService.getMembers(
+            organizationId = orgId,
+            offset = offset,
+            limit = limit + 1
+        )
+        
+        return MemberConnection.Builder(ctx)
+            .fromSlice(
+                items = response.members,
+                hasNextPage = response.members.size > limit
+            ) { member ->
+                MemberEdge.Builder(ctx)
+                    .node(ctx.nodeFor(member.userId))
+                    .role(member.role)
+                    .joinedAt(member.joinedAt)
+                    .build()
+            }
+            .totalCount(response.totalCount)
+            .build()
+    }
+}
+```
+
+```kotlin Native Cursors
+@Resolver
+class UserNotificationsResolver @Inject constructor(
+    private val notificationService: NotificationService
+) : UserResolvers.Notifications() {
+    override suspend fun resolve(ctx: Context): NotificationConnection {
+        val userId = ctx.objectValue.getId().internalID
+        
+        val response = notificationService.getNotifications(
+            userId = userId,
+            cursor = ctx.arguments.after,
+            limit = ctx.arguments.first ?: 20
+        )
+        
+        return NotificationConnection.Builder(ctx)
+            .fromEdges(
+                edges = response.notifications.map { notification ->
+                    NotificationEdge.Builder(ctx)
+                        .node(
+                            Notification.Builder(ctx)
+                                .id(ctx.globalIDFor(
+                                    Notification.Reflection,
+                                    notification.id
+                                ))
+                                .message(notification.message)
+                                .createdAt(notification.createdAt)
+                                .build()
+                        )
+                        .cursor(notification.cursor)
+                        .read(notification.isRead)
+                        .build()
+                },
+                hasNextPage = response.hasMore,
+                hasPreviousPage = false
+            )
+            .build()
+    }
+}
+```
+</CodeGroup>
+
+## Querying Connections
+
+### Forward Pagination
+
+```graphql
+query GetUsers {
+  users(first: 10) {
+    edges {
+      node {
+        id
+        name
+      }
+      cursor
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+```
+
+### Next Page
+
+```graphql
+query GetNextPage {
+  users(first: 10, after: "cursor-from-previous-query") {
+    edges {
+      node {
+        id
+        name
+      }
+      cursor
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+}
+```
+
+### Backward Pagination
+
+```graphql
+query GetPreviousPage {
+  users(last: 10, before: "cursor-from-current-page") {
+    edges {
+      node {
+        id
+        name
+      }
+      cursor
+    }
+    pageInfo {
+      hasPreviousPage
+      startCursor
+    }
+  }
+}
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Fetch limit + 1">
+    Always fetch one more item than requested to efficiently check for more pages:
+    
+    ```kotlin
+    val items = service.fetch(offset, limit + 1)
+    val hasNextPage = items.size > limit
+    ```
+  </Step>
+  
+  <Step title="Set reasonable defaults">
+    Provide default page sizes to prevent large queries:
+    
+    ```kotlin
+    val limit = ctx.arguments.first ?: 20
+    ```
+  </Step>
+  
+  <Step title="Include totalCount when available">
+    Add `totalCount` to help clients build pagination UI:
+    
+    ```kotlin
+    .totalCount(response.total)
+    ```
+  </Step>
+  
+  <Step title="Use fromSlice for offset/limit">
+    Let Viaduct handle cursor encoding:
+    
+    ```kotlin
+    .fromSlice(items, hasNextPage) { ctx.nodeFor(it.id) }
+    ```
+  </Step>
+  
+  <Step title="Keep cursors opaque">
+    Don't expose internal cursor format to clients. Viaduct handles encoding/decoding automatically.
+  </Step>
+</Steps>
+
+## Cursor Stability
+
+<Warning>
+  **Offset-based cursors** may produce duplicate or skipped results when underlying data changes between requests. For strict cursor stability, use backend-native cursors with `fromEdges()`.
+</Warning>
+
+## Choosing an Approach
+
+| Backend Support | Method | When to Use |
+|----------------|--------|-------------|
+| Native cursors | `fromEdges()` | Backend provides stable cursors (e.g., DynamoDB, MongoDB) |
+| Offset/limit | `fromSlice()` | SQL databases with OFFSET/LIMIT |
+| Small datasets | `fromList()` | Complete dataset fits in memory |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Global IDs" icon="fingerprint" href="/guides/global-ids">
+    Learn about type-safe global identifiers
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Test your connection resolvers
+  </Card>
+</CardGroup>

@@ -1,0 +1,522 @@
+---
+title: Global IDs
+description: Type-safe global identifiers with GlobalID<T> and @idOf
+---
+
+Viaduct provides type-safe global identifiers for Node objects through the `GlobalID<T>` type. Instead of plain strings, you get compile-time type safety that prevents mixing up IDs of different types.
+
+## Why Global IDs?
+
+<CardGroup cols={2}>
+  <Card title="Type Safety" icon="shield-check">
+    Prevent passing a User ID where a Post ID is expected at compile time
+  </Card>
+  <Card title="Encode Type Info" icon="tag">
+    IDs contain both the type name and internal identifier
+  </Card>
+  <Card title="Relay Compatible" icon="plug">
+    Works with the Relay `node(id: ID!)` query pattern
+  </Card>
+  <Card title="Opaque to Clients" icon="eye-slash">
+    Internal ID structure is hidden from API consumers
+  </Card>
+</CardGroup>
+
+## The Node Interface
+
+Types implementing `Node` are globally identifiable:
+
+```graphql
+interface Node {
+  id: ID!
+}
+
+type User implements Node {
+  id: ID!  # This is a GlobalID<User>
+  name: String!
+  email: String!
+}
+
+type Post implements Node {
+  id: ID!  # This is a GlobalID<Post>
+  title: String!
+  content: String!
+}
+```
+
+<Note>
+  Viaduct automatically provides the `Node` interface and `node(id: ID!)` query when your schema uses Node types.
+</Note>
+
+## GlobalID vs String
+
+Viaduct uses two Kotlin types to represent GraphQL `ID` fields:
+
+### GlobalID&lt;T&gt; is used for:
+
+1. **The `id` field of Node types**
+   ```graphql
+   type User implements Node {
+     id: ID!  # GlobalID<User> in Kotlin
+   }
+   ```
+
+2. **Fields with `@idOf` directive**
+   ```graphql
+   type Post {
+     authorId: ID! @idOf(type: "User")  # GlobalID<User> in Kotlin
+   }
+   ```
+
+### String is used for:
+
+- All other `ID` fields without `@idOf`
+
+```graphql
+type User implements Node {
+  id: ID!                              # GlobalID<User>
+  internalId: ID!                      # String
+  userId: ID! @idOf(type: "User")      # GlobalID<User>
+  legacyId: ID!                        # String
+}
+```
+
+## Using @idOf
+
+The `@idOf` directive declares that an ID field references a specific Node type:
+
+### On Field Definitions
+
+```graphql
+type Post implements Node {
+  id: ID!
+  title: String!
+  
+  # This is a GlobalID<User> in Kotlin
+  authorId: ID! @idOf(type: "User")
+}
+```
+
+### On Input Fields
+
+```graphql
+input CreatePostInput {
+  title: String!
+  content: String!
+  
+  # Type-safe: must be a User ID
+  authorId: ID! @idOf(type: "User")
+  
+  # List of Tag IDs
+  tagIds: [ID!] @idOf(type: "Tag")
+}
+```
+
+### On Arguments
+
+```graphql
+extend type Query {
+  user(id: ID! @idOf(type: "User")): User @resolver
+  
+  posts(
+    authorId: ID @idOf(type: "User")
+    first: Int
+  ): PostConnection! @resolver
+}
+
+extend type Mutation {
+  deletePost(id: ID! @idOf(type: "Post")): Boolean @resolver
+}
+```
+
+## Working with GlobalIDs
+
+### In Resolvers
+
+GlobalIDs are automatically used in generated resolver signatures:
+
+```kotlin
+import viaduct.api.globalid.GlobalID
+import viaduct.api.grts.User
+import viaduct.api.grts.Post
+
+@Resolver
+class CreatePostMutation @Inject constructor(
+    private val postService: PostService
+) : MutationResolvers.CreatePost() {
+    override suspend fun resolve(ctx: Context): Post {
+        val input = ctx.arguments.input
+        
+        // authorId is GlobalID<User>, not String
+        val authorId: GlobalID<User> = input.authorId
+        val tagIds: List<GlobalID<Tag>> = input.tagIds
+        
+        // Extract internal ID
+        val internalAuthorId: String = authorId.internalID
+        
+        val postId = postService.createPost(
+            title = input.title,
+            content = input.content,
+            authorId = internalAuthorId,
+            tagIds = tagIds.map { it.internalID }
+        )
+        
+        return ctx.nodeFor(postId)
+    }
+}
+```
+
+### Creating GlobalIDs
+
+Use `ctx.globalIDFor()` to create GlobalIDs:
+
+```kotlin
+import viaduct.api.grts.User
+
+@Resolver
+class SomeResolver : SomeResolvers.SomeField() {
+    override suspend fun resolve(ctx: Context): Result {
+        val userId = "12345"
+        
+        // Create a GlobalID<User>
+        val globalId = ctx.globalIDFor(
+            reflection = User.Reflection,
+            internalID = userId
+        )
+        
+        return Result.Builder(ctx)
+            .userId(globalId)
+            .build()
+    }
+}
+```
+
+### Creating Node References
+
+Use `ctx.nodeFor()` to create node references:
+
+```kotlin
+@Resolver
+class PostAuthorResolver @Inject constructor(
+    private val postService: PostService
+) : PostResolvers.Author() {
+    override suspend fun resolve(ctx: Context): User {
+        val post = ctx.objectValue
+        val authorId = post.getAuthorId()  // GlobalID<User>
+        
+        // Create node reference - will call User node resolver
+        return ctx.nodeFor(authorId)
+    }
+}
+```
+
+### Extracting Internal IDs
+
+Access the wrapped internal ID:
+
+```kotlin
+val globalId: GlobalID<User> = ctx.arguments.userId
+val internalId: String = globalId.internalID
+
+// Use internal ID with your service layer
+val user = userService.getUser(internalId)
+```
+
+## GlobalID Structure
+
+GlobalIDs encode both type and internal ID:
+
+```kotlin
+val userId = ctx.globalIDFor(User.Reflection, "12345")
+
+// Serialized format (opaque to clients):
+// "User:12345" (actual encoding may vary)
+
+// Access components:
+val typeName: String = userId.typeName        // "User"
+val internalId: String = userId.internalID    // "12345"
+```
+
+<Warning>
+  The exact encoding format is internal to Viaduct and may change. Never parse or construct GlobalID strings manually.
+</Warning>
+
+## Type Safety Benefits
+
+### Compile-Time Checks
+
+```kotlin
+fun createPost(authorId: GlobalID<User>, categoryId: GlobalID<Category>) {
+    // This compiles
+    userService.getUser(authorId.internalID)
+    
+    // This won't compile - type mismatch!
+    userService.getUser(categoryId.internalID)
+}
+```
+
+### Preventing Mix-ups
+
+```kotlin
+// Without GlobalID (unsafe)
+fun deletePost(userId: String, postId: String) {
+    // Easy to accidentally swap these!
+    postService.delete(userId, postId)  // Wrong order!
+}
+
+// With GlobalID (safe)
+fun deletePost(userId: GlobalID<User>, postId: GlobalID<Post>) {
+    // Won't compile if you swap them
+    postService.delete(postId, userId)  // Compile error!
+}
+```
+
+## Relay Node Query
+
+Viaduct automatically provides the `node` query:
+
+```graphql
+extend type Query {
+  node(id: ID!): Node
+  nodes(ids: [ID!]!): [Node]!
+}
+```
+
+### Usage
+
+```graphql
+query GetUser {
+  node(id: "User:12345") {
+    ... on User {
+      id
+      name
+      email
+    }
+  }
+}
+
+query GetMultipleNodes {
+  nodes(ids: ["User:1", "Post:2", "User:3"]) {
+    ... on User {
+      id
+      name
+    }
+    ... on Post {
+      id
+      title
+    }
+  }
+}
+```
+
+<Tip>
+  The `node` query automatically routes to the correct node resolver based on the type encoded in the GlobalID.
+</Tip>
+
+## Interface Constraints
+
+If a Node type implements an interface with an `id` field, that interface must also implement Node:
+
+```graphql
+# Good
+interface Timestamped implements Node {
+  id: ID!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type User implements Node & Timestamped {
+  id: ID!
+  name: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+# Bad - interface has id but doesn't implement Node
+interface HasId {
+  id: ID!  # Error: must implement Node
+}
+```
+
+## Real-World Examples
+
+<CodeGroup>
+```graphql Schema
+type User implements Node {
+  id: ID!
+  username: String!
+  posts(first: Int): PostConnection! @resolver
+}
+
+type Post implements Node {
+  id: ID!
+  title: String!
+  
+  # GlobalID reference
+  authorId: ID! @idOf(type: "User")
+  author: User @resolver
+}
+
+extend type Query {
+  user(id: ID! @idOf(type: "User")): User @resolver
+  post(id: ID! @idOf(type: "Post")): Post @resolver
+}
+
+extend type Mutation {
+  createPost(input: CreatePostInput!): Post @resolver
+}
+
+input CreatePostInput {
+  title: String!
+  content: String!
+  authorId: ID! @idOf(type: "User")
+}
+```
+
+```kotlin Creating IDs
+@Resolver
+class UserResolver @Inject constructor(
+    private val userService: UserService
+) : NodeResolvers.User() {
+    override suspend fun resolve(ctx: Context): User {
+        // ctx.id is GlobalID<User>
+        val userId: GlobalID<User> = ctx.id
+        val internalId = userId.internalID
+        
+        val userData = userService.getUser(internalId)
+        
+        return User.Builder(ctx)
+            .username(userData.username)
+            .build()
+    }
+}
+```
+
+```kotlin Using IDs
+@Resolver
+class PostAuthorResolver : PostResolvers.Author() {
+    override suspend fun resolve(ctx: Context): User {
+        // Get authorId from post
+        val authorId: GlobalID<User> = ctx.objectValue.getAuthorId()
+        
+        // Create node reference
+        return ctx.nodeFor(authorId)
+    }
+}
+```
+
+```kotlin Mutation with IDs
+@Resolver
+class CreatePostMutation @Inject constructor(
+    private val postService: PostService
+) : MutationResolvers.CreatePost() {
+    override suspend fun resolve(ctx: Context): Post {
+        val input = ctx.arguments.input
+        
+        // input.authorId is GlobalID<User>
+        val authorId: GlobalID<User> = input.authorId
+        
+        val postId = postService.createPost(
+            title = input.title,
+            content = input.content,
+            authorId = authorId.internalID
+        )
+        
+        // Create GlobalID for the new post
+        val postGlobalId = ctx.globalIDFor(
+            Post.Reflection,
+            postId
+        )
+        
+        return ctx.nodeFor(postGlobalId)
+    }
+}
+```
+</CodeGroup>
+
+## Reflection API
+
+Each GRT provides a `Reflection` object for working with GlobalIDs:
+
+```kotlin
+import viaduct.api.grts.User
+
+// Create GlobalID from string
+val globalId = ctx.globalIDFor(User.Reflection, "12345")
+
+// Create from companion object method
+val globalId2 = User.Reflection.globalId("12345")
+
+// Get type name
+val typeName = User.Reflection.typeName  // "User"
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Always use @idOf for Node references">
+    Declare ID types in your schema:
+    
+    ```graphql
+    # Good
+    authorId: ID! @idOf(type: "User")
+    
+    # Bad - just a string
+    authorId: ID!
+    ```
+  </Step>
+  
+  <Step title="Use ctx.nodeFor() for relationships">
+    Create node references instead of building inline:
+    
+    ```kotlin
+    // Good
+    return ctx.nodeFor(authorId)
+    
+    // Bad
+    return User.Builder(ctx)...build()
+    ```
+  </Step>
+  
+  <Step title="Extract internalID for service calls">
+    Use the wrapped ID with your backend:
+    
+    ```kotlin
+    val userId = ctx.arguments.id.internalID
+    userService.delete(userId)
+    ```
+  </Step>
+  
+  <Step title="Never parse GlobalID strings">
+    Let Viaduct handle encoding/decoding:
+    
+    ```kotlin
+    // Bad - don't do this!
+    val parts = globalIdString.split(":")
+    
+    // Good - use the API
+    val internalId = globalId.internalID
+    ```
+  </Step>
+</Steps>
+
+## Comparison
+
+| Feature | String IDs | GlobalID&lt;T&gt; |
+|---------|-----------|-------------|
+| Type safety | None | Compile-time |
+| Relay compatible | Manual | Automatic |
+| Type encoding | Manual | Built-in |
+| Node routing | Manual | Automatic |
+| Accidental swaps | Possible | Prevented |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Learn how to test resolvers with GlobalIDs
+  </Card>
+  <Card title="Writing Resolvers" icon="code" href="/guides/writing-resolvers">
+    Review resolver implementation patterns
+  </Card>
+</CardGroup>

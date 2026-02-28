@@ -1,0 +1,535 @@
+---
+title: Custom Scalars
+description: Extended scalar types provided by Viaduct beyond GraphQL standard scalars
+---
+
+Viaduct provides extended scalar types beyond GraphQL's standard scalars (`Int`, `Float`, `String`, `Boolean`, `ID`). These scalars are automatically available in every schema without explicit declaration.
+
+## Standard GraphQL Scalars
+
+For reference, GraphQL includes these standard scalars:
+
+| Scalar | Description | Kotlin Type |
+|--------|-------------|-------------|
+| `Int` | 32-bit signed integer | `Int` |
+| `Float` | Double-precision floating-point | `Double` |
+| `String` | UTF-8 character sequence | `String` |
+| `Boolean` | True or false | `Boolean` |
+| `ID` | Unique identifier (serialized as String) | `String` or `GlobalID<T>` |
+
+## Viaduct Extended Scalars
+
+### Date
+
+ISO 8601 date format (YYYY-MM-DD) without time or timezone information.
+
+**Kotlin Type:** `java.time.LocalDate`
+
+**Format:** ISO 8601 date (`YYYY-MM-DD`)
+
+**Example Values:**
+```
+"2024-10-29"
+"2023-01-15"
+"1990-12-31"
+```
+
+**GraphQL Schema:**
+
+```graphql
+type User {
+  id: ID!
+  name: String!
+  birthDate: Date
+  registeredOn: Date!
+}
+```
+
+**Resolver Usage:**
+
+```kotlin
+import java.time.LocalDate
+
+class UserResolver : UserQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): User {
+        return User.builder()
+            .id(userId)
+            .name("Alice")
+            .birthDate(LocalDate.of(1990, 5, 15))
+            .registeredOn(LocalDate.now())
+            .build()
+    }
+}
+```
+
+**GraphQL Query:**
+
+```graphql
+query {
+  user(id: "123") {
+    birthDate
+    registeredOn
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "user": {
+      "birthDate": "1990-05-15",
+      "registeredOn": "2024-10-29"
+    }
+  }
+}
+```
+
+---
+
+### DateTime
+
+ISO 8601 date-time format with timezone information (typically UTC).
+
+**Kotlin Type:** `java.time.Instant`
+
+**Format:** ISO 8601 date-time with timezone
+
+**Example Values:**
+```
+"2024-10-29T14:30:00Z"
+"2023-12-25T08:00:00.123Z"
+"2024-01-01T00:00:00Z"
+```
+
+**GraphQL Schema:**
+
+```graphql
+type Post {
+  id: ID!
+  title: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  publishedAt: DateTime
+}
+```
+
+**Resolver Usage:**
+
+```kotlin
+import java.time.Instant
+
+class PostResolver : PostQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): Post {
+        return Post.builder()
+            .id(postId)
+            .title("My Post")
+            .createdAt(Instant.now())
+            .updatedAt(Instant.now())
+            .build()
+    }
+}
+```
+
+**GraphQL Query:**
+
+```graphql
+query {
+  post(id: "456") {
+    createdAt
+    updatedAt
+    publishedAt
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "post": {
+      "createdAt": "2024-10-29T14:30:00.123Z",
+      "updatedAt": "2024-10-29T15:45:30.456Z",
+      "publishedAt": null
+    }
+  }
+}
+```
+
+---
+
+### Long
+
+64-bit signed integer, extending beyond GraphQL's standard `Int` (32-bit).
+
+**Kotlin Type:** `Long`
+
+**Range:** -9,223,372,036,854,775,808 to 9,223,372,036,854,775,807
+
+**Example Values:**
+```
+9223372036854775807
+1234567890123456
+-9999999999999999
+```
+
+**GraphQL Schema:**
+
+```graphql
+type Analytics {
+  totalViews: Long!
+  uniqueVisitors: Long!
+  timestamp: Long!  # Unix timestamp in milliseconds
+}
+
+type File {
+  name: String!
+  sizeBytes: Long!
+}
+```
+
+**Resolver Usage:**
+
+```kotlin
+class AnalyticsResolver : AnalyticsQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): Analytics {
+        return Analytics.builder()
+            .totalViews(9_876_543_210L)
+            .uniqueVisitors(1_234_567L)
+            .timestamp(System.currentTimeMillis())
+            .build()
+    }
+}
+```
+
+**When to Use:**
+- Large counters or IDs
+- Unix timestamps in milliseconds
+- File sizes in bytes
+- Large numeric identifiers
+- Any value that might exceed 2^31-1 (2,147,483,647)
+
+---
+
+### BigDecimal
+
+Arbitrary precision decimal number for exact decimal arithmetic.
+
+**Kotlin Type:** `java.math.BigDecimal`
+
+**Format:** String representation in GraphQL, arbitrary precision in Kotlin
+
+**Example Values:**
+```
+"123.456789012345"
+"0.00000001"
+"999999999999999.99"
+```
+
+**GraphQL Schema:**
+
+```graphql
+type Product {
+  id: ID!
+  name: String!
+  price: BigDecimal!
+  weight: BigDecimal
+}
+
+type Transaction {
+  amount: BigDecimal!
+  fee: BigDecimal!
+  total: BigDecimal!
+}
+```
+
+**Resolver Usage:**
+
+```kotlin
+import java.math.BigDecimal
+
+class ProductResolver : ProductQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): Product {
+        return Product.builder()
+            .id(productId)
+            .name("Widget")
+            .price(BigDecimal("19.99"))
+            .weight(BigDecimal("0.453592"))
+            .build()
+    }
+}
+```
+
+**GraphQL Query:**
+
+```graphql
+query {
+  product(id: "789") {
+    price
+    weight
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "product": {
+      "price": "19.99",
+      "weight": "0.453592"
+    }
+  }
+}
+```
+
+**When to Use:**
+- Financial calculations (prices, amounts, fees)
+- Scientific measurements requiring precision
+- Any calculation where floating-point errors are unacceptable
+- Percentages or rates requiring exact representation
+
+**Warning:** Never use `Float` or `Double` for money! Always use `BigDecimal`.
+
+---
+
+### BigInteger
+
+Arbitrary precision integer for very large whole numbers.
+
+**Kotlin Type:** `java.math.BigInteger`
+
+**Format:** String representation in GraphQL
+
+**Example Values:**
+```
+"12345678901234567890"
+"999999999999999999999999999999"
+"-88888888888888888888888888"
+```
+
+**GraphQL Schema:**
+
+```graphql
+type Cryptographic {
+  publicKey: BigInteger!
+  largeNumber: BigInteger
+}
+
+type Statistics {
+  totalOperations: BigInteger!
+  combinationsCount: BigInteger
+}
+```
+
+**Resolver Usage:**
+
+```kotlin
+import java.math.BigInteger
+
+class CryptographicResolver : CryptographicQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): Cryptographic {
+        return Cryptographic.builder()
+            .publicKey(BigInteger("123456789012345678901234567890"))
+            .build()
+    }
+}
+```
+
+**When to Use:**
+- Cryptographic keys or hashes
+- Very large counters beyond `Long` range
+- Mathematical calculations with huge integers
+- Combinatorial calculations
+
+---
+
+### JSON
+
+Generic JSON object type that can represent any JSON structure.
+
+**Kotlin Type:** `com.fasterxml.jackson.databind.JsonNode`
+
+**Format:** Any valid JSON value (object, array, string, number, boolean, null)
+
+**Example Values:**
+```json
+{"key": "value", "nested": {"count": 42}}
+[1, 2, 3, {"id": "abc"}]
+"simple string"
+123
+true
+null
+```
+
+**GraphQL Schema:**
+
+```graphql
+type Configuration {
+  id: ID!
+  settings: JSON!
+  metadata: JSON
+}
+
+type ApiResponse {
+  rawData: JSON!
+}
+```
+
+**Resolver Usage:**
+
+```kotlin
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+
+class ConfigurationResolver : ConfigurationQueryResolver() {
+    private val objectMapper = ObjectMapper()
+    
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): Configuration {
+        val settingsJson = objectMapper.readTree("""
+            {
+                "theme": "dark",
+                "notifications": {
+                    "email": true,
+                    "push": false
+                },
+                "limits": [10, 20, 50, 100]
+            }
+        """)
+        
+        return Configuration.builder()
+            .id(configId)
+            .settings(settingsJson)
+            .build()
+    }
+}
+```
+
+**GraphQL Query:**
+
+```graphql
+query {
+  configuration(id: "config-1") {
+    settings
+    metadata
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "configuration": {
+      "settings": {
+        "theme": "dark",
+        "notifications": {
+          "email": true,
+          "push": false
+        },
+        "limits": [10, 20, 50, 100]
+      },
+      "metadata": null
+    }
+  }
+}
+```
+
+**When to Use:**
+- Dynamic configuration data
+- Flexible metadata fields
+- Integration with external APIs (passthrough)
+- Schema evolution (before defining proper types)
+
+**When NOT to Use:**
+- When you can define proper GraphQL types
+- For type-safe, well-structured data
+- When clients need to introspect the structure
+
+---
+
+## Scalar Summary
+
+| Scalar | Kotlin Type | Format | Example | Use Case |
+|--------|-------------|--------|---------|----------|
+| `Date` | `LocalDate` | ISO 8601 date | `"2024-10-29"` | Dates without time |
+| `DateTime` | `Instant` | ISO 8601 date-time | `"2024-10-29T14:30:00Z"` | Timestamps |
+| `Long` | `Long` | 64-bit integer | `9223372036854775807` | Large integers |
+| `BigDecimal` | `BigDecimal` | Arbitrary decimal | `"123.456"` | Financial data |
+| `BigInteger` | `BigInteger` | Arbitrary integer | `"123...890"` | Very large integers |
+| `JSON` | `JsonNode` | Any JSON | `{"key": "value"}` | Dynamic data |
+
+## Internal Scalars
+
+### BackingData
+
+Special internal scalar type used by the `@backingData` directive. Not typically used directly in schemas.
+
+**Purpose:** Internal representation for backing data class references.
+
+---
+
+## Best Practices
+
+### Do
+
+- **Use `DateTime` for timestamps** - Prefer over `Long` unix timestamps for clarity
+- **Use `Date` for dates without time** - Don't use `DateTime` for date-only values
+- **Use `BigDecimal` for money** - Never use `Float` for financial calculations
+- **Use `Long` for large counters** - When values might exceed 2 billion
+- **Use proper types over `JSON`** - Define structured types when possible
+
+### Don't
+
+- **Don't use `Float` for money** - Floating-point errors will cause issues
+- **Don't use `Int` for large values** - It will overflow at 2,147,483,647
+- **Don't overuse `JSON`** - It bypasses type safety and introspection
+- **Don't use `String` for dates** - Use proper `Date` or `DateTime` types
+- **Don't redefine standard scalars** - They're automatically available
+
+## Type Conversion
+
+### Input (GraphQL → Kotlin)
+
+```kotlin
+// Date: "2024-10-29" → LocalDate
+val date: LocalDate = arguments.date  // Automatic conversion
+
+// DateTime: "2024-10-29T14:30:00Z" → Instant
+val timestamp: Instant = arguments.timestamp
+
+// Long: 9876543210 → Long
+val count: Long = arguments.count
+
+// BigDecimal: "19.99" → BigDecimal
+val price: BigDecimal = arguments.price
+
+// JSON: {...} → JsonNode
+val settings: JsonNode = arguments.settings
+```
+
+### Output (Kotlin → GraphQL)
+
+```kotlin
+import java.time.LocalDate
+import java.time.Instant
+import java.math.BigDecimal
+
+User.builder()
+    .birthDate(LocalDate.of(1990, 5, 15))      // → "1990-05-15"
+    .createdAt(Instant.now())                   // → "2024-10-29T14:30:00Z"
+    .viewCount(9_876_543_210L)                  // → 9876543210
+    .balance(BigDecimal("1234.56"))            // → "1234.56"
+    .settings(objectMapper.readTree("{...}"))  // → {...}
+    .build()
+```
+
+## See Also
+
+- [Built-in Types](built-in-types) - Node interface and connection types
+- [Directives](directives) - GraphQL directives
+- [Tenant API](tenant-api) - Using scalars in resolvers

@@ -1,0 +1,315 @@
+---
+title: 'Jetty Starter Tutorial'
+description: 'Build a GraphQL HTTP server using Viaduct with Eclipse Jetty servlets'
+icon: 'server'
+---
+
+## Overview
+
+The Jetty Starter demonstrates how to integrate Viaduct with a lightweight HTTP server using Eclipse Jetty servlet container. This tutorial shows you how to:
+
+- Set up a GraphQL-over-HTTP endpoint using servlets
+- Handle both POST and GET requests
+- Serve the GraphiQL interactive IDE
+- Parse and execute GraphQL queries from HTTP requests
+
+## What You'll Learn
+
+- Creating a custom GraphQL servlet with Viaduct
+- Setting up Jetty embedded server
+- Handling different content types (JSON, GraphQL)
+- Implementing GraphiQL for interactive query testing
+- Module-based architecture with automatic schema generation
+
+## Prerequisites
+
+- Java JDK 21 installed
+- `JAVA_HOME` environment variable set correctly or `java` in your PATH
+
+## Project Structure
+
+```
+jetty-starter/
+├── src/main/kotlin/com/example/viadapp/
+│   ├── JettyViaductApp.kt         # Main application & server setup
+│   ├── ViaductServlet.kt          # GraphQL HTTP endpoint
+│   └── GraphiQLServlet.kt         # GraphiQL UI endpoint
+├── resolvers/                      # GraphQL resolver module
+│   └── src/main/
+│       ├── kotlin/.../resolvers/
+│       │   └── HelloWorldResolvers.kt
+│       └── viaduct/schema/
+│           └── schema.graphqls
+└── src/test/kotlin/                # Integration tests
+```
+
+<Steps>
+
+### Create the Viaduct Servlet
+
+The `ViaductServlet` handles GraphQL requests over HTTP. Here's the core implementation in `ViaductServlet.kt:16`:
+
+```kotlin
+class ViaductServlet(
+    private val viaduct: Viaduct
+) : HttpServlet() {
+    private val objectMapper = ObjectMapper()
+
+    override fun doPost(
+        req: HttpServletRequest,
+        resp: HttpServletResponse
+    ) {
+        val contentType = req.contentType?.lowercase()?.split(";")?.get(0)?.trim()
+
+        when (contentType) {
+            null, "application/json", "application/graphql+json" -> handleJsonPost(req, resp)
+            "application/graphql" -> handleGraphQLPost(req, resp)
+            else -> sendError(resp, 415, "Unsupported Content-Type: $contentType")
+        }
+    }
+
+    private fun executeGraphQL(
+        query: String,
+        variables: Map<String, Any>,
+        operationName: String?,
+        resp: HttpServletResponse
+    ) {
+        val executionInput = ExecutionInput.create(
+            operationText = query,
+            variables = variables,
+            operationName = operationName
+        )
+        
+        val result = runBlocking {
+            viaduct.executeAsync(executionInput).join()
+        }
+        
+        val statusCode = if (result.errors.isNotEmpty()) 400 else 200
+        sendJson(resp, statusCode, result.toSpecification())
+    }
+}
+```
+
+**Key Features:**
+- Supports `application/json` and `application/graphql` content types
+- Handles both POST and GET requests
+- Returns proper HTTP status codes (200 for success, 400 for errors)
+- Uses `viaduct.executeAsync()` for asynchronous query execution
+
+### Set Up the Jetty Server
+
+The main application in `JettyViaductApp.kt:14` creates and configures the server:
+
+```kotlin
+class JettyViaductApp(private val port: Int = 8080) {
+    private val server: Server
+
+    init {
+        // Create a Viaduct engine using BasicViaductFactory
+        val viaduct = BasicViaductFactory.create(
+            tenantRegistrationInfo = TenantRegistrationInfo(
+                tenantPackagePrefix = "com.example.viadapp"
+            )
+        )
+
+        // Create the servlets
+        val viaductServlet = ViaductServlet(viaduct)
+        val graphiqlServlet = GraphiQLServlet()
+
+        // Set up Jetty server
+        server = Server(port)
+        val context = ServletContextHandler(ServletContextHandler.NO_SESSIONS)
+        context.contextPath = "/"
+        context.addServlet(ServletHolder(viaductServlet), "/graphql")
+        context.addServlet(ServletHolder(graphiqlServlet), "/graphiql")
+
+        server.handler = context
+    }
+
+    fun start() {
+        server.start()
+    }
+}
+
+fun main(argv: Array<String>) {
+    val app = JettyViaductApp()
+    app.start()
+    app.join()
+}
+```
+
+**Key Points:**
+- `BasicViaductFactory` automatically discovers schemas and resolvers
+- Two servlets are registered: `/graphql` for queries, `/graphiql` for the UI
+- The server is lightweight and starts quickly
+
+### Define Schema and Resolvers
+
+The GraphQL schema is defined in `resolvers/src/main/viaduct/schema/schema.graphqls`:
+
+```graphql
+extend type Query {
+  greeting: String @resolver
+  author: String @resolver
+}
+```
+
+Resolvers are implemented in `resolvers/src/main/kotlin/.../HelloWorldResolvers.kt`:
+
+```kotlin
+@Resolver
+class GreetingResolver : QueryResolvers.Greeting() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Hello from Jetty + Viaduct!"
+    }
+}
+
+@Resolver
+class AuthorResolver : QueryResolvers.Author() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Viaduct GraphQL with Jetty"
+    }
+}
+```
+
+### Start the Server
+
+Run the application:
+
+```bash
+./gradlew run
+```
+
+The server will start on `http://localhost:8080`.
+
+### Test with curl (JSON)
+
+Send a GraphQL query via POST with JSON:
+
+```bash
+curl 'http://localhost:8080/graphql' \
+  -H 'content-type: application/json' \
+  --data-raw '{"query":"{ greeting }"}'
+```
+
+**Response:**
+```json
+{"data":{"greeting":"Hello from Jetty + Viaduct!"}}
+```
+
+### Test with curl (Multiple Fields)
+
+Query multiple fields:
+
+```bash
+curl 'http://localhost:8080/graphql' \
+  -H 'content-type: application/json' \
+  --data-raw '{"query":"query HelloWorld { greeting author }"}'
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "greeting": "Hello from Jetty + Viaduct!",
+    "author": "Viaduct GraphQL with Jetty"
+  }
+}
+```
+
+### Test with GET Requests
+
+The servlet also supports GET requests with query parameters:
+
+```bash
+curl 'http://localhost:8080/graphql?query=%7B%20greeting%20%7D'
+```
+
+**Response:**
+```json
+{"data":{"greeting":"Hello from Jetty + Viaduct!"}}
+```
+
+### Use GraphiQL
+
+Open your browser and navigate to:
+
+```
+http://localhost:8080/graphiql
+```
+
+Try this query in the GraphiQL interface:
+
+```graphql
+query HelloWorld {
+  greeting
+  author
+}
+```
+
+**Expected Response:**
+```json
+{
+  "data": {
+    "greeting": "Hello from Jetty + Viaduct!",
+    "author": "Viaduct GraphQL with Jetty"
+  }
+}
+```
+
+### Run Tests
+
+Execute the integration tests:
+
+```bash
+./gradlew test
+```
+
+The tests start an embedded Jetty server and verify GraphQL endpoint behavior.
+
+</Steps>
+
+## How It Works
+
+### Request Flow
+
+1. **HTTP Request**: Client sends a POST or GET request to `/graphql`
+2. **Content Type Detection**: Servlet determines if it's JSON or raw GraphQL
+3. **Query Parsing**: Extract query, variables, and operation name
+4. **ExecutionInput Creation**: Build Viaduct's execution input object
+5. **Query Execution**: `viaduct.executeAsync()` processes the query
+6. **Response Serialization**: Convert result to JSON and send HTTP response
+
+### Supported Content Types
+
+- **`application/json`**: Standard GraphQL-over-HTTP (POST)
+- **`application/graphql`**: Raw GraphQL query string (POST)
+- **Query parameters**: For simple GET requests
+
+### Error Handling
+
+The servlet returns appropriate HTTP status codes:
+- **200 OK**: Successful query execution
+- **400 Bad Request**: GraphQL errors (e.g., validation failures)
+- **415 Unsupported Media Type**: Invalid content type
+- **500 Internal Server Error**: Execution exceptions
+
+## Module-Based Architecture
+
+The project separates concerns:
+
+1. **Main Application**: Server setup and servlet configuration
+2. **Resolvers Module**: Schema and resolver implementations
+3. **Test Suite**: Integration tests for the HTTP endpoint
+
+`BasicViaductFactory` automatically:
+- Scans for `.graphqls` schema files
+- Generates resolver base classes at compile time
+- Discovers `@Resolver` annotated classes at runtime
+
+## Next Steps
+
+- Explore the [Ktor Starter Tutorial](/tutorials/ktor-starter) for a Kotlin-native server framework
+- Learn about [Micronaut integration](/tutorials/micronaut-starter) for dependency injection
+- Review the [Star Wars Tutorial](/tutorials/starwars) for complex data modeling
+- Read about [Error Handling](/advanced/error-handling) in production applications

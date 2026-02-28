@@ -1,0 +1,513 @@
+---
+title: Subqueries
+description: Execute GraphQL queries and mutations from within resolvers using ctx.query() and ctx.mutation()
+---
+
+Subqueries enable resolvers to execute GraphQL operations against the root `Query` or `Mutation` types during field resolution. This provides a powerful way to compose complex resolver logic by reusing existing GraphQL operations.
+
+## Overview
+
+Viaduct provides two methods for executing subqueries:
+
+- `ctx.query()` - Executes queries against the root `Query` type
+- `ctx.mutation()` - Executes mutations against the root `Mutation` type (only available in mutation resolvers)
+
+## Basic Usage: ctx.query()
+
+`ctx.query()` executes a GraphQL query from inside a resolver and returns a typed object with accessor methods for each selected field.
+
+### Example: Checking if User is Viewer
+
+```kotlin
+@Resolver(
+    objectValueFragment = "fragment _ on User { id firstName lastName }"
+)
+class UserDisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        val id = ctx.objectValue.getId()
+        val fn = ctx.objectValue.getFirstName()
+        val ln = ctx.objectValue.getLastName()
+        
+        // Execute subquery to check if this user is the viewer
+        val query = ctx.query("{ viewer { user { id } } }")
+        val isViewer = id == query.getViewer()?.getUser()?.getId()
+        val suffix = if (isViewer) " (you!)" else ""
+        
+        return when {
+            fn == null && ln == null -> null
+            fn == null -> ln
+            ln == null -> fn
+            else -> "$fn $ln$suffix"
+        }
+    }
+}
+```
+
+## Query Syntax
+
+The selection string uses standard GraphQL syntax:
+
+```kotlin
+// Simple field selection
+val query = ctx.query("{ currentUser { id name } }")
+
+// With arguments
+val query = ctx.query("{ user(id: \"123\") { name email } }")
+
+// With nested selections
+val query = ctx.query("""
+    {
+        listing(id: "456") {
+            title
+            host {
+                name
+                avatar
+            }
+            photos {
+                url
+                caption
+            }
+        }
+    }
+""")
+
+// With inline fragments
+val query = ctx.query("""
+    {
+        node(id: "abc") {
+            ... on User { name }
+            ... on Listing { title }
+        }
+    }
+""")
+
+// With aliases
+val query = ctx.query("""
+    {
+        author: user(id: "1") { name }
+        reviewer: user(id: "2") { name }
+    }
+""")
+```
+
+<Note>
+  All standard GraphQL selection syntax is supported: fields, arguments, inline fragments, and aliases.
+</Note>
+
+## Using Variables
+
+Pass variables to subqueries using the `variables` parameter:
+
+```kotlin
+val listingId = ctx.arguments.listingId
+
+val query = ctx.query(
+    selection = "{ listing(id: \$listingId) { title coverPhoto { url } } }",
+    variables = mapOf("listingId" to listingId)
+)
+
+val title = query.getListing()?.getTitle()
+val photoUrl = query.getListing()?.getCoverPhoto()?.getUrl()
+```
+
+### Variable Scope
+
+Subquery variables are scoped to the subquery itself:
+
+- They **don't inherit** from the parent request's variables
+- They **don't leak back** to the parent
+- Two subqueries with the same selection but different variables are fully independent
+
+```kotlin
+// These are two independent subqueries
+val query1 = ctx.query(
+    "{ listing(id: \$id) { title } }",
+    variables = mapOf("id" to "123")
+)
+
+val query2 = ctx.query(
+    "{ listing(id: \$id) { title } }",
+    variables = mapOf("id" to "456")  // Different variables
+)
+```
+
+## Async Field Access
+
+Field getters on subquery results are **suspend functions**:
+
+```kotlin
+val query = ctx.query("{ currentUser { id name email } }")
+
+// These are suspend functions
+val id = query.getCurrentUser()?.getId()        // Suspends if not resolved yet
+val name = query.getCurrentUser()?.getName()    // Suspends if not resolved yet
+val email = query.getCurrentUser()?.getEmail()  // Suspends if not resolved yet
+```
+
+Your resolver can continue executing before the subquery has fully resolved. If you access a field that hasn't resolved yet, the getter suspends until the value is available.
+
+### UnsetFieldException
+
+If you access a field that wasn't part of your selection string, you'll get an `UnsetFieldException` at runtime:
+
+```kotlin
+val query = ctx.query("{ currentUser { id name } }")
+
+val name = query.getCurrentUser()?.getName()  // ✅ OK
+val email = query.getCurrentUser()?.getEmail() // ❌ Throws UnsetFieldException
+```
+
+## ctx.mutation()
+
+Mutation field resolvers can execute submutations via `ctx.mutation()`. This works the same way as `ctx.query()`, but:
+
+- Runs against the root `Mutation` type
+- Executes top-level fields serially (matching standard GraphQL mutation semantics)
+- Only available in mutation resolver contexts (enforced at compile time)
+
+### Example: Chaining Mutations
+
+```kotlin
+@Resolver
+class UpdateAndPublishResolver @Inject constructor(
+    val client: ListingServiceClient
+) : MutationResolvers.UpdateAndPublish() {
+    override suspend fun resolve(ctx: Context): Listing {
+        // Update the listing first
+        client.update(ctx.arguments.input)
+        
+        // Execute a submutation to publish it
+        val result = ctx.mutation(
+            selection = "{ publishListing(id: \$id) { id title status } }",
+            variables = mapOf("id" to ctx.arguments.id)
+        )
+        
+        // Return the published listing
+        return ctx.nodeFor(ctx.arguments.id)
+    }
+}
+```
+
+### Calling Queries from Mutations
+
+Mutation resolvers can freely call `ctx.query()` as well:
+
+```kotlin
+@Resolver
+class CreateListingResolver : MutationResolvers.CreateListing() {
+    override suspend fun resolve(ctx: Context): CreateListingPayload {
+        // Create the listing
+        val listingId = listingService.create(ctx.arguments.input)
+        
+        // Query the current user
+        val query = ctx.query("{ currentUser { id name } }")
+        val userId = query.getCurrentUser()?.getId()
+        
+        // Log the creation
+        auditLog.record("Listing $listingId created by user $userId")
+        
+        return CreateListingPayload.Builder(ctx)
+            .listingId(listingId)
+            .build()
+    }
+}
+```
+
+## Schema and Isolation
+
+### Full Schema Access
+
+Subqueries run against the **full schema**, not any restricted client-facing view:
+
+```kotlin
+// Even if the parent request has scope restrictions,
+// subqueries can access the full internal schema
+val query = ctx.query("""
+    {
+        internalMetrics {  # May not be visible to external clients
+            requestCount
+            errorRate
+        }
+    }
+""")
+```
+
+<Tip>
+  When a resolver issues a subquery, it's consulting the complete graph, regardless of the request's scope restrictions.
+</Tip>
+
+### Isolated Result Store
+
+Each subquery gets its own isolated result store:
+
+- Fields resolved in one subquery **don't share results** with other subqueries
+- Fields resolved in a subquery **don't share results** with the parent query
+- Each subquery maintains its own field resolution state
+
+However, **request-level state is shared**:
+
+- Data loaders (for batching)
+- Error accumulation
+- Instrumentation and tracing
+- Request context
+
+## Nested Subqueries
+
+Subqueries can issue their own subqueries. A resolver invoked during subquery execution has the same `ctx.query()` and `ctx.mutation()` capabilities:
+
+```kotlin
+// Parent resolver
+@Resolver
+class ListingRecommendationsResolver : QueryResolvers.ListingRecommendations() {
+    override suspend fun resolve(ctx: Context): List<Listing> {
+        // First subquery
+        val query = ctx.query("{ currentUser { id preferences } }")
+        val preferences = query.getCurrentUser()?.getPreferences()
+        
+        // Fetch recommendations based on preferences
+        return recommendationService.getListings(preferences)
+    }
+}
+
+// A resolver called during the subquery above might also use subqueries
+@Resolver
+class UserPreferencesResolver : UserResolvers.Preferences() {
+    override suspend fun resolve(ctx: Context): Preferences {
+        // Nested subquery
+        val query = ctx.query("{ defaultPreferences { theme language } }")
+        val defaults = query.getDefaultPreferences()
+        
+        // Merge with user preferences
+        return mergePreferences(ctx.objectValue, defaults)
+    }
+}
+```
+
+All nested subqueries share the parent execution context and request-scoped state.
+
+## Error Handling
+
+Subquery failures surface as `SubqueryExecutionException`:
+
+### Invalid Selection Syntax
+
+```kotlin
+try {
+    val query = ctx.query("{ invalid syntax here }")
+} catch (e: SubqueryExecutionException) {
+    logger.error("Subquery failed: ${e.message}")
+    // Handle error
+}
+```
+
+### Unset Field Access
+
+```kotlin
+val query = ctx.query("{ currentUser { id } }")
+
+try {
+    val email = query.getCurrentUser()?.getEmail()  // Not in selection
+} catch (e: UnsetFieldException) {
+    logger.error("Attempted to access field not in subquery selection")
+}
+```
+
+### Field Resolution Errors
+
+Errors from field resolution flow into the result's error list:
+
+```kotlin
+val query = ctx.query("{ listing(id: \"invalid\") { title } }")
+
+// The query executes, but errors are tracked
+val listing = query.getListing()  // May be null if resolution failed
+
+// Errors are separate from the parent query
+if (listing == null) {
+    logger.warn("Subquery returned null, check subquery errors")
+}
+```
+
+<Warning>
+  Errors from subqueries are attributed separately from the parent query, so they won't silently contaminate the parent result.
+</Warning>
+
+## When to Use Subqueries vs @Resolver Fragments
+
+The core distinction is **when** the engine learns what data you need.
+
+### @Resolver Fragments (Declarative)
+
+With `@Resolver` fragments (`objectValueFragment`, `queryValueFragment`):
+
+- The engine sees your data requirements at **query planning time**
+- Data is fetched **before** your resolver runs
+- The framework **batches and deduplicates** identical field requests across all resolver instances
+- More efficient for static data dependencies
+
+```kotlin
+@Resolver(
+    objectValueFragment = "fragment _ on User { id firstName lastName }",
+    queryValueFragment = "fragment _ on Query { currentUser { id } }"
+)
+class UserDisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        // Data already available
+        val fn = ctx.objectValue.getFirstName()
+        val ln = ctx.objectValue.getLastName()
+        val isViewer = ctx.objectValue.getId() == ctx.queryValue.getCurrentUser()?.getId()
+        
+        // ...
+    }
+}
+```
+
+### ctx.query() (Imperative)
+
+With `ctx.query()`:
+
+- The engine doesn't know what you need until your **resolver calls it**
+- Each call triggers a **separate execution** with its own query plan
+- Useful for dynamic or conditional data requirements
+
+```kotlin
+@Resolver(objectValueFragment = "fragment _ on User { id }")
+class UserDisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        val id = ctx.objectValue.getId()
+        
+        // Dynamic: only fetch if needed
+        val query = if (shouldCheckViewer(id)) {
+            ctx.query("{ currentUser { id } }")
+        } else {
+            null
+        }
+        
+        // ...
+    }
+}
+```
+
+### Decision Matrix
+
+| Approach | Use When |
+|----------|----------|
+| `objectValueFragment` | Your resolver needs fields from the parent object, known ahead of time |
+| `queryValueFragment` | Your resolver needs fields from the root Query, known ahead of time |
+| `ctx.query()` | Which fields you need depends on runtime data or conditional logic |
+| `ctx.mutation()` | You need to execute another mutation from a mutation resolver |
+
+<Tip>
+  Prefer declarative fragments when possible for better performance. Use subqueries for dynamic requirements.
+</Tip>
+
+## Real-World Example: Conditional Data Loading
+
+```kotlin
+@Resolver(objectValueFragment = "fragment _ on Listing { id status }")
+class ListingFullDetailsResolver : ListingResolvers.FullDetails() {
+    override suspend fun resolve(ctx: Context): ListingDetails {
+        val listingId = ctx.objectValue.getId()
+        val status = ctx.objectValue.getStatus()
+        
+        // Only fetch sensitive details for approved listings
+        val hostDetails = if (status == "APPROVED") {
+            val query = ctx.query("""
+                {
+                    listing(id: \$listingId) {
+                        host {
+                            id
+                            name
+                            email
+                            phone
+                        }
+                    }
+                }
+            """, variables = mapOf("listingId" to listingId))
+            
+            query.getListing()?.getHost()
+        } else {
+            null
+        }
+        
+        return ListingDetails.Builder(ctx)
+            .hostDetails(hostDetails)
+            .build()
+    }
+}
+```
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Prefer Declarative Fragments">
+    Use `@Resolver` fragments when data requirements are known at registration time:
+    
+    ```kotlin
+    // ✅ Good: Static requirements
+    @Resolver(objectValueFragment = "fragment _ on User { id name }")
+    
+    // ❌ Bad: Using subquery for static data
+    @Resolver
+    class MyResolver {
+        override suspend fun resolve(ctx: Context): String {
+            val query = ctx.query("{ currentUser { id name } }")
+            // ...
+        }
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Request Only What You Need">
+    Keep subquery selections minimal:
+    
+    ```kotlin
+    // ✅ Good: Request only needed fields
+    ctx.query("{ currentUser { id } }")
+    
+    // ❌ Bad: Over-fetching
+    ctx.query("{ currentUser { id name email avatar preferences } }")
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle Errors Gracefully">
+    Always consider that subqueries can fail:
+    
+    ```kotlin
+    val query = ctx.query("{ currentUser { id } }")
+    val userId = query.getCurrentUser()?.getId()
+    
+    if (userId == null) {
+        logger.warn("Could not fetch current user")
+        // Handle gracefully
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Use Variables for Dynamic Values">
+    Never interpolate values directly into query strings:
+    
+    ```kotlin
+    // ✅ Good: Using variables
+    ctx.query(
+        "{ user(id: \$id) { name } }",
+        variables = mapOf("id" to userId)
+    )
+    
+    // ❌ Bad: String interpolation (injection risk)
+    ctx.query("{ user(id: \"$userId\") { name } }")
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Resolvers" icon="code" href="/essentials/resolvers">
+    Learn about resolver basics and the @resolver directive
+  </Card>
+  
+  <Card title="Batch Resolution" icon="layer-group" href="/advanced/batch-resolution">
+    Solve the N+1 problem with efficient batch loading
+  </Card>
+</CardGroup>

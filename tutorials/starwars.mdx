@@ -1,0 +1,368 @@
+---
+title: 'Star Wars Tutorial'
+description: 'Comprehensive tutorial showing advanced Viaduct features with a Star Wars GraphQL API'
+icon: 'rocket'
+---
+
+## Overview
+
+The Star Wars demo is a comprehensive GraphQL application that models the Star Wars universe with characters, films, species, planets, and starships. This tutorial demonstrates advanced Viaduct features including:
+
+- Multi-module architecture
+- Field-level context and scoped fields
+- Batch resolvers to prevent N+1 queries
+- Global ID system with the Node interface
+- Complex relationships between types
+- Mock data repositories
+
+## What You'll Learn
+
+- How to structure a large-scale Viaduct application with multiple modules
+- Implementing batch resolvers for efficient data loading
+- Using scoped fields for field-level authorization
+- Working with Viaduct's Node interface and global IDs
+- Building complex GraphQL queries with nested relationships
+- Integrating Viaduct with Micronaut for dependency injection
+
+## Prerequisites
+
+- Java JDK 21
+- `JAVA_HOME` correctly set, or `java` in your PATH
+- Understanding of GraphQL basics
+
+## Project Structure
+
+```
+starwars/
+├── src/main/kotlin/com/example/starwars/
+│   └── service/
+│       ├── Application.kt              # Micronaut entry point
+│       ├── viaduct/
+│       │   └── ViaductRestController.kt # GraphQL HTTP endpoint
+│       └── graphiql/
+│           └── GraphiQLController.kt    # GraphiQL UI
+├── modules/
+│   ├── filmography/                    # Film & character module
+│   │   └── src/main/
+│   │       ├── viaduct/schema/
+│   │       │   ├── Character.graphqls
+│   │       │   └── Film.graphqls
+│   │       └── kotlin/.../resolvers/
+│   └── universe/                       # Planets, species, starships
+│       └── src/main/
+│           ├── viaduct/schema/
+│           │   ├── Planet.graphqls
+│           │   ├── Species.graphqls
+│           │   └── Starship.graphqls
+│           └── kotlin/.../resolvers/
+└── common/                             # Shared utilities & data
+```
+
+<Steps>
+
+### Start the Server
+
+Launch the Star Wars GraphQL server:
+
+```bash
+./gradlew run
+```
+
+The server will start at `http://localhost:8080`.
+
+### Access GraphiQL
+
+Open your browser and navigate to the interactive GraphiQL interface:
+
+```
+http://localhost:8080/graphiql
+```
+
+GraphiQL provides:
+- Auto-completion for queries
+- Schema exploration via the Docs panel
+- Query history
+- Global ID encoder/decoder (🔑 icon)
+
+### Query Characters
+
+Try a basic query to retrieve Star Wars characters:
+
+```graphql
+query {
+  allCharacters(limit: 5) {
+    id
+    name
+    homeworld {
+      name
+    }
+  }
+}
+```
+
+**Expected Response:**
+```json
+{
+  "data": {
+    "allCharacters": [
+      {
+        "id": "Q2hhcmFjdGVyOjE=",
+        "name": "Luke Skywalker",
+        "homeworld": {
+          "name": "Tatooine"
+        }
+      },
+      // ... more characters
+    ]
+  }
+}
+```
+
+**Key Points:**
+- The `id` field returns a base64-encoded global ID (e.g., `Q2hhcmFjdGVyOjE=` = `Character:1`)
+- Relationships like `homeworld` are resolved automatically
+- The `limit` parameter controls pagination
+
+### Use Scoped Fields
+
+Some fields are protected by scopes. For example, `Species.culturalNotes` requires the `extras` scope.
+
+Query species without the scope:
+
+```graphql
+query {
+  node(id: "U3BlY2llczox") {
+    ... on Species {
+      name
+      culturalNotes
+      specialAbilities
+    }
+  }
+}
+```
+
+Without the `extras` scope, `culturalNotes` will be `null`.
+
+Now add the scope header in GraphiQL's **Headers** tab:
+
+```json
+{
+  "X-Viaduct-Scopes": "extras"
+}
+```
+
+Run the query again, and `culturalNotes` will now be populated.
+
+**How It Works:**
+
+In `ViaductRestController.kt:46`, the controller reads the `X-Viaduct-Scopes` header:
+
+```kotlin
+suspend fun graphql(
+    @Body request: Map<String, Any>,
+    @Header(SCOPES_HEADER) scopesHeader: String?,
+    @Header("security-access") securityAccess: String?
+): HttpResponse<Map<String, Any?>> {
+    val scopes = parseScopes(scopesHeader)
+    val schemaId = determineSchemaId(scopes)
+    val result = viaduct.executeAsync(executionInput, schemaId).await()
+    // ...
+}
+```
+
+The schema definition marks fields with scope requirements:
+
+```graphql
+type Species implements Node {
+  culturalNotes: String @scope(to: ["extras"])
+}
+```
+
+### Run Complex Batch-Resolved Queries
+
+Query multiple characters with computed fields that use batch resolution:
+
+```graphql
+query {
+  allCharacters(limit: 3) {
+    name
+    homeworld { name }
+    species { name }
+    filmCount
+    richSummary
+  }
+}
+```
+
+**Expected Response:**
+```json
+{
+  "data": {
+    "allCharacters": [
+      {
+        "name": "Luke Skywalker",
+        "homeworld": { "name": "Tatooine" },
+        "species": { "name": "Human" },
+        "filmCount": 4,
+        "richSummary": "Luke Skywalker is a Human from Tatooine who appears in 4 films."
+      },
+      // ...
+    ]
+  }
+}
+```
+
+**Batch Resolution:**
+
+Fields like `filmCount` and `richSummary` are computed by batch resolvers in `CharacterResolvers.kt`, `SpeciesBatchResolver.kt`, and `FilmCountBatchResolver.kt`.
+
+Batch resolvers process multiple characters at once, avoiding N+1 query problems:
+
+```kotlin
+@BatchResolver
+class FilmCountBatchResolver : CharacterResolvers.FilmCount() {
+    override suspend fun resolve(ctx: BatchContext): Map<Character, Int> {
+        // Efficiently fetch film counts for all characters at once
+        val filmCounts = filmRepository.getFilmCountsForCharacters(ctx.sources)
+        return ctx.sources.associateWith { character ->
+            filmCounts[character.id] ?: 0
+        }
+    }
+}
+```
+
+### Query Films with Characters
+
+Retrieve films and their main characters:
+
+```graphql
+query {
+  allFilms {
+    title
+    director
+    mainCharacters {
+      name
+      homeworld { name }
+    }
+  }
+}
+```
+
+### Work with Global IDs and the Node Interface
+
+Viaduct uses a global ID system where every `Node` has a unique `id`.
+
+**ID Format:**
+- Base64-encoded string: `TypeName:LocalId`
+- Example: `Character:5` → `Q2hhcmFjdGVyOjU=`
+
+**Look up any Node by ID:**
+
+```graphql
+query {
+  node(id: "Q2hhcmFjdGVyOjU=") {
+    ... on Character {
+      name
+      homeworld {
+        id
+      }
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "node": {
+      "name": "Obi-Wan Kenobi",
+      "homeworld": {
+        "id": "UGxhbmV0OjQ="
+      }
+    }
+  }
+}
+```
+
+You can then query the planet by its ID:
+
+```graphql
+query {
+  node(id: "UGxhbmV0OjQ=") {
+    ... on Planet {
+      name
+    }
+  }
+}
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "node": {
+      "name": "Stewjon"
+    }
+  }
+}
+```
+
+**Decode IDs:** Use the key icon (🔑) in GraphiQL's toolbar to encode/decode IDs.
+
+</Steps>
+
+## Key Concepts Demonstrated
+
+### Multi-Module Architecture
+
+The Star Wars app is organized into logical modules:
+- **filmography**: Characters and films
+- **universe**: Planets, species, starships
+- **common**: Shared data repositories and utilities
+
+Each module has its own schema files and resolvers, demonstrating how to scale Viaduct applications.
+
+### Batch Resolvers
+
+Batch resolvers prevent N+1 query problems by processing multiple parent objects at once:
+
+```kotlin
+@BatchResolver
+class SpeciesBatchResolver : CharacterResolvers.Species() {
+    override suspend fun resolve(ctx: BatchContext): Map<Character, Species?> {
+        // Load species for all characters in one database call
+        val speciesMap = speciesRepository.getByIds(ctx.sources.map { it.speciesId })
+        return ctx.sources.associateWith { character ->
+            speciesMap[character.speciesId]
+        }
+    }
+}
+```
+
+### Field-Level Scopes
+
+Scoped fields allow fine-grained access control:
+
+```graphql
+type Species implements Node {
+  name: String
+  culturalNotes: String @scope(to: ["extras"])  # Requires 'extras' scope
+  specialAbilities: [String] @scope(to: ["extras"])
+}
+```
+
+### Node Interface
+
+Every major type implements the `Node` interface, providing:
+- Global unique `id` field
+- Ability to query any object via `node(id: ID!)`
+- Consistent identity across the schema
+
+## Next Steps
+
+- Explore the source code in `demoapps/starwars/`
+- Review resolver implementations in the `modules/` directories
+- Learn about [Resolvers](/essentials/resolvers) in the core documentation
+- Study [Batch Resolution](/advanced/batch-resolvers) for performance optimization
+- Check out the [Getting Started Guide](/quickstart) for foundational concepts

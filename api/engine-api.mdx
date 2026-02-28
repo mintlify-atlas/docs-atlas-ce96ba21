@@ -1,0 +1,301 @@
+---
+title: Engine API
+description: Core GraphQL execution engine that processes queries and mutations
+---
+
+The Engine API (`viaduct.engine.api`) defines the core GraphQL execution algorithm implemented by Viaduct. This is a lower-level API primarily used internally by the Service API, but understanding it helps with advanced customization and troubleshooting.
+
+## Overview
+
+The Engine API provides:
+
+- The `Engine` interface for executing GraphQL operations
+- Intra-operation interfaces for resolver execution
+- Selection set resolution and completion
+- Schema representation (`ViaductSchema`)
+
+**Audience:** This API is primarily for **service engineers** who need deep integration with Viaduct internals. Most developers should use the higher-level [Service API](service-api) instead.
+
+## Core Interfaces
+
+### Engine
+
+Core GraphQL execution engine that processes queries, mutations, and subscriptions against a compiled Viaduct schema.
+
+```kotlin
+interface Engine {
+    val schema: ViaductSchema
+    suspend fun execute(executionInput: ExecutionInput): ExecutionResult
+    suspend fun resolveSelectionSet(...): EngineObjectData
+    suspend fun completeSelectionSet(...): ExecutionResult
+}
+```
+
+**Package:** `viaduct.engine.api`
+
+**Creation:** Instances are produced through `EngineFactory` (found in `viaduct.engine.wiring`).
+
+#### Properties
+
+<ResponseField name="schema" type="ViaductSchema">
+  The compiled GraphQL schema this engine executes against
+</ResponseField>
+
+#### Methods
+
+<ResponseField name="execute" type="suspend (ExecutionInput) -> ExecutionResult">
+  Executes a GraphQL operation.
+  
+  **Parameters:**
+  - `executionInput: ExecutionInput` - The GraphQL operation to execute, including query text and variables
+  
+  **Returns:** The completed GraphQL execution result containing data and errors
+  
+  **Note:** This is the engine-level `ExecutionInput`, which may differ from the service-level version.
+</ResponseField>
+
+<ResponseField name="resolveSelectionSet" type="suspend (ExecutionHandle, EngineSelectionSet, ResolveSelectionSetOptions) -> EngineObjectData">
+  Executes a selection set from within a resolver using an existing execution context.
+  
+  **Internal wiring-layer API.** Prefer using:
+  - `EngineExecutionContext.resolveSelectionSet()` from the engine layer
+  - `ctx.query()` / `ctx.mutation()` from the tenant level
+  
+  This enables resolvers to execute additional queries or mutations without rebuilding GraphQL-Java state.
+  
+  **Parameters:**
+  - `executionHandle: EngineExecutionContext.ExecutionHandle` - Opaque handle from current execution (get via `EngineExecutionContext.executionHandle`)
+  - `selectionSet: EngineSelectionSet` - The fields to resolve
+  - `options: ResolveSelectionSetOptions` - Execution behavior controls
+  
+  **Returns:** Resolved `EngineObjectData` wrapping the target result
+  
+  **Throws:** `SubqueryExecutionException` on execution failures
+  
+  **Important:** The execution handle must be obtained from the current request context. Do not cache, construct custom implementations, or share across requests.
+</ResponseField>
+
+<ResponseField name="completeSelectionSet" type="suspend (ExecutionHandle, RequiredSelectionSet, ObjectEngineResult?, Map<String, Any?>, CompleteSelectionSetOptions) -> ExecutionResult">
+  Completes a selection set against an ObjectEngineResult, transforming already-resolved field values into an ExecutionResult.
+  
+  **Internal wiring-layer API.** Prefer using `EngineExecutionContext.completeSelectionSet()` from the engine layer.
+  
+  Unlike `resolveSelectionSet` which triggers field resolution, this method waits for already-in-progress resolution and transforms the resolved values into a completed result. Useful for shims executing classic data fetchers on the modern engine.
+  
+  **Process:**
+  1. Resolves RSS variables using provided arguments and engine data
+  2. Builds a QueryPlan from the selection set (cache-backed)
+  3. Waits for field resolution to complete
+  4. Transforms values into an ExecutionResult with data and errors
+  
+  **Parameters:**
+  - `executionHandle: ExecutionHandle` - Opaque handle from current execution
+  - `selectionSet: RequiredSelectionSet` - The fields to complete
+  - `targetResult: ObjectEngineResult?` - Explicit result to complete against; null uses parentEngineResult from handle
+  - `arguments: Map<String, Any?>` - Field arguments for RSS variable resolution
+  - `options: CompleteSelectionSetOptions` - Completion behavior controls
+  
+  **Returns:** Completed ExecutionResult containing the data Map and any errors
+  
+  **Throws:** `SubqueryExecutionException` if executionHandle is null or completion fails
+</ResponseField>
+
+### OperationType
+
+Enum representing the type of operation for selection execution.
+
+```kotlin
+enum class OperationType {
+    QUERY,
+    MUTATION
+}
+```
+
+**Package:** `viaduct.engine.api`
+
+**Values:**
+
+<ResponseField name="QUERY" type="enum value">
+  Read-only operation (GraphQL Query)
+</ResponseField>
+
+<ResponseField name="MUTATION" type="enum value">
+  Write operation (GraphQL Mutation)
+</ResponseField>
+
+## Executor Interfaces
+
+The engine uses executor interfaces to invoke resolvers. These are implemented by the Tenant API layer.
+
+### FieldResolverExecutor
+
+Interface for executing field resolvers. When it's time to invoke a resolver, the engine calls the executor's `batchResolve` function.
+
+```kotlin
+interface FieldResolverExecutor {
+    suspend fun batchResolve(context: ExecutionContext): List<FieldResult>
+}
+```
+
+**Package:** `viaduct.engine.api`
+
+**Implementation:** The Tenant API produces implementations of this interface for each field resolver written by application developers.
+
+## Engine Objects and Data
+
+These types represent GraphQL objects and their data within the engine.
+
+### EngineObject
+
+Represents a GraphQL object instance within the engine.
+
+**Package:** `viaduct.engine.api`
+
+### EngineObjectData
+
+Container for engine object data with field values.
+
+**Package:** `viaduct.engine.api`
+
+### EngineObjectDataBuilder
+
+Builder for constructing `EngineObjectData` instances.
+
+**Package:** `viaduct.engine.api`
+
+## Selection Sets
+
+### EngineSelectionSet
+
+Represents a set of GraphQL field selections within the engine.
+
+**Package:** `viaduct.engine.api`
+
+**Usage:** Used when resolving subqueries or executing selections programmatically.
+
+### RequiredSelectionSet
+
+Represents a required selection set that must be resolved.
+
+**Package:** `viaduct.engine.api`
+
+## Execution Context
+
+### EngineExecutionContext
+
+Context object available during engine execution, providing access to execution state and utilities.
+
+```kotlin
+interface EngineExecutionContext {
+    val executionHandle: ExecutionHandle
+    // ... additional context methods
+}
+```
+
+<ResponseField name="executionHandle" type="ExecutionHandle">
+  Opaque handle to the current execution context. Required for calling `resolveSelectionSet` and `completeSelectionSet`.
+  
+  **Important:** Do not cache, construct custom implementations, or share across requests.
+</ResponseField>
+
+### ExecutionHandle
+
+Opaque handle representing the current execution context.
+
+**Package:** `viaduct.engine.api`
+
+**Usage:** Obtain via `EngineExecutionContext.executionHandle` and pass to engine methods. This is an internal type that should not be constructed or cached by application code.
+
+## Data Reading
+
+### EngineDataReader
+
+Interface for reading field data from engine objects.
+
+**Package:** `viaduct.engine.api`
+
+### InputValueReader
+
+Interface for reading GraphQL input values (arguments, variables).
+
+**Package:** `viaduct.engine.api`
+
+## Error Handling
+
+### GraphQLBuildError
+
+Represents an error that occurred during schema building or validation.
+
+**Package:** `viaduct.engine.api`
+
+## Checker System
+
+The checker system provides validation and authorization hooks during execution.
+
+### CheckerExecutor
+
+Executes checker logic during field resolution.
+
+**Package:** `viaduct.engine.api`
+
+### CheckerExecutorFactory
+
+Factory for creating checker executors.
+
+**Package:** `viaduct.engine.api`
+
+### CheckerMetadata
+
+Metadata about a checker.
+
+**Package:** `viaduct.engine.api`
+
+### CheckerResult
+
+Result of executing a checker.
+
+**Package:** `viaduct.engine.api`
+
+### CheckerResultContext
+
+Context for checker results.
+
+**Package:** `viaduct.engine.api`
+
+## Advanced Types
+
+### Coordinate
+
+Represents a GraphQL schema coordinate (type.field).
+
+**Package:** `viaduct.engine.api`
+
+**Example:** `User.email`, `Query.user`
+
+### ExecutionAttribution
+
+Tracks attribution information for execution.
+
+**Package:** `viaduct.engine.api`
+
+### CompleteSelectionSetOptions
+
+Options for controlling selection set completion behavior.
+
+**Package:** `viaduct.engine.api`
+
+## Architecture Notes
+
+The engine directory contains three subprojects:
+
+- **`engine/api`** - Defines interfaces for both top-level and intra-operation APIs
+- **`engine/runtime`** - Contains implementations of those interfaces
+- **`engine/wiring`** - Contains `EngineFactory` for creating Engine instances
+
+The top-level API consists mostly of the `Engine` interface. Most of `engine/api` pertains to the intra-operation API used by the engine to invoke resolvers.
+
+## See Also
+
+- [Service API](service-api) - Higher-level API for service integration
+- [Tenant API](tenant-api) - Interfaces for implementing resolvers
+- Source: `/workspace/source/engine/AGENTS.md` - Detailed engine architecture

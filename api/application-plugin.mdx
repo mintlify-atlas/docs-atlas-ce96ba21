@@ -1,0 +1,574 @@
+---
+title: Application Gradle Plugin
+description: Root Gradle plugin for Viaduct applications with schema assembly and GRT generation
+---
+
+The Viaduct Application Gradle Plugin (`com.airbnb.viaduct.application-gradle-plugin`) is applied to the root project of a Viaduct application. It orchestrates schema assembly from all modules, generates GRT (Generated Runtime Types) classes, and provides development tools.
+
+## Overview
+
+The application plugin provides:
+
+- **Central schema assembly** - Combines schema partitions from all modules
+- **GRT (Generated Runtime Types) generation** - Generates type-safe GraphQL object classes
+- **Development server** - GraphiQL IDE for local development (`serve` task)
+- **Scaffolding** - Project setup utilities (`scaffold` task)
+- **Schema validation** - Build-time schema validation
+- **Distribution** - Packages GRT JAR with central schema
+
+## Installation
+
+**In root `build.gradle.kts`:**
+
+```kotlin
+plugins {
+    kotlin("jvm") version "1.9.22"
+    id("com.airbnb.viaduct.application-gradle-plugin") version "<version>"
+}
+
+viaductApplication {
+    grtPackageName.set("com.example.myapp")
+    modulePackagePrefix.set("com.example.myapp")  // Optional
+    servePort.set(8080)                            // Optional
+    serveHost.set("localhost")                     // Optional
+}
+
+dependencies {
+    // Application-level dependencies
+    implementation("com.airbnb.viaduct:service-api:<version>")
+    implementation("io.ktor:ktor-server-netty:<version>")
+}
+```
+
+**Project Structure:**
+
+```
+myapp/
+  ├── build.gradle.kts          # Root with application plugin
+  ├── settings.gradle.kts
+  ├── src/
+  │   ├── main/
+  │   │   ├── kotlin/
+  │   │   │   └── com/example/myapp/
+  │   │   │       ├── Application.kt
+  │   │   │       └── ViaductConfig.kt
+  │   │   └── viaduct/
+  │   │       └── schemabase/      # Optional: app-wide schema
+  │   └── viaduct/
+  │       └── schema/              # Optional: root extensions
+  ├── modules/
+  │   ├── users/
+  │   │   └── build.gradle.kts  # Module plugin
+  │   └── posts/
+  │       └── build.gradle.kts  # Module plugin
+  └── build/
+      ├── generated/viaduct/
+      │   └── grt/              # Generated Runtime Types
+      └── viaduct-central-schema/
+```
+
+## Extension
+
+### viaductApplication
+
+Configuration extension for application-level settings.
+
+```kotlin
+viaductApplication {
+    grtPackageName.set("com.example.myapp")
+    modulePackagePrefix.set("com.example.myapp")
+    servePort.set(8080)
+    serveHost.set("localhost")
+}
+```
+
+#### Properties
+
+<ParamField path="grtPackageName" type="Property<String>" required>
+  Package name for generated GRT (Generated Runtime Types) classes.
+  
+  **Example:** `"com.example.myapp"`
+  
+  **Effect:** All generated type classes will be in this package
+  
+  ```kotlin
+  import com.example.myapp.User
+  import com.example.myapp.Post
+  import com.example.myapp.Query
+  ```
+</ParamField>
+
+<ParamField path="modulePackagePrefix" type="Property<String>">
+  Optional package prefix for modules. Used by the development server to discover modules.
+  
+  **Example:** `"com.example.myapp"`
+  
+  **Default:** Empty (scans all packages)
+</ParamField>
+
+<ParamField path="servePort" type="Property<Int>">
+  Port for the development server.
+  
+  **Default:** `8080`
+  
+  **Override at runtime:**
+  ```bash
+  ./gradlew serve -Pserve.port=3000
+  ```
+</ParamField>
+
+<ParamField path="serveHost" type="Property<String>">
+  Host for the development server.
+  
+  **Default:** `"localhost"`
+  
+  **Override at runtime:**
+  ```bash
+  ./gradlew serve -Pserve.host=0.0.0.0
+  ```
+</ParamField>
+
+## Tasks
+
+### assembleViaductCentralSchema
+
+Combines schema partitions from all modules into a central schema.
+
+**Type:** `AssembleCentralSchemaTask`
+
+**Input:**
+- Schema partitions from all module plugins
+- Optional base schema from `src/main/viaduct/schemabase/`
+- Optional common schema from `src/viaduct/schema/`
+
+**Output:**
+- Central schema directory in `build/viaduct-central-schema/`
+
+**Configuration:**
+
+```kotlin
+tasks.named<AssembleCentralSchemaTask>("assembleViaductCentralSchema") {
+    schemaPartitions.setFrom(/* from module plugins */)
+    baseSchemaFiles.setFrom(fileTree("src/main/viaduct/schemabase"))
+    commonSchemaFiles.setFrom(fileTree("src/viaduct/schema"))
+    outputDirectory.set(file("build/viaduct-central-schema"))
+}
+```
+
+**Properties:**
+
+<ResponseField name="schemaPartitions" type="ConfigurableFileCollection">
+  Schema partitions from all module plugins (automatically configured)
+</ResponseField>
+
+<ResponseField name="baseSchemaFiles" type="ConfigurableFileCollection">
+  Application-wide base schema files from `src/main/viaduct/schemabase/`
+  
+  **Use for:**
+  - Custom directives
+  - Application-wide types
+  - Shared interfaces
+</ResponseField>
+
+<ResponseField name="commonSchemaFiles" type="ConfigurableFileCollection">
+  Root-level schema extensions from `src/viaduct/schema/`
+  
+  **Use for:**
+  - Global Query/Mutation extensions
+  - Cross-module fields
+</ResponseField>
+
+<ResponseField name="outputDirectory" type="DirectoryProperty">
+  Output directory for the assembled central schema
+</ResponseField>
+
+**Central Schema Structure:**
+
+```
+build/viaduct-central-schema/
+  ├── BUILTIN_SCHEMA.graphqls     # Viaduct built-ins
+  ├── partition/
+  │   ├── users/graphql/
+  │   │   ├── User.graphqls
+  │   │   └── Query.graphqls
+  │   └── posts/graphql/
+  │       ├── Post.graphqls
+  │       └── Query.graphqls
+  └── base/
+      └── CustomDirectives.graphqls
+```
+
+---
+
+### generateViaductGRTs
+
+Generates GRT (Generated Runtime Types) classes and packages them with the central schema.
+
+**Type:** `Jar`
+
+**Input:**
+- Central schema from `assembleViaductCentralSchema`
+
+**Output:**
+- JAR file: `build/libs/viaduct-grt.jar`
+
+**Contents:**
+- Generated type classes (`.class` files)
+- Central schema GraphQL files (in `viaduct/centralSchema/`)
+
+**Generated Classes Include:**
+
+- **Object types** - `User`, `Post`, `Comment`
+- **Input types** - `CreateUserInput`, `UpdatePostInput`
+- **Enums** - `Role`, `Status`
+- **Interfaces** - `Node`, `Timestamped`
+- **Arguments** - `UserQueryArguments`, `PostsConnectionArguments`
+- **Reflection types** - `User.Reflection`, `Post.Reflection`
+- **Builders** - `User.Builder`, `Post.Builder`
+
+**Example Generated Class:**
+
+```kotlin
+package com.example.myapp
+
+import viaduct.api.types.NodeObject
+import viaduct.api.globalid.GlobalID
+
+interface User : NodeObject {
+    override val id: GlobalID<User>
+    val name: String
+    val email: String
+    
+    companion object Reflection : Type<User> {
+        override val typeName = "User"
+    }
+    
+    interface Builder {
+        fun id(id: GlobalID<User>): Builder
+        fun name(name: String): Builder
+        fun email(email: String): Builder
+        fun build(): User
+    }
+}
+```
+
+---
+
+### serve
+
+Starts the Viaduct development server with GraphiQL IDE.
+
+**Type:** `JavaExec`
+
+**Features:**
+- GraphiQL web interface for testing queries
+- Automatic schema discovery from modules
+- Hot reload with `--continuous` flag
+- CORS enabled for local development
+- WebSocket support for subscriptions
+
+**Usage:**
+
+```bash
+# Basic usage
+./gradlew serve
+
+# With hot reload (recommended)
+./gradlew --continuous serve
+
+# Custom port and host
+./gradlew serve -Pserve.port=3000 -Pserve.host=0.0.0.0
+```
+
+**Output:**
+
+```
+> Task :serve
+Starting Viaduct Development Server...
+GraphiQL IDE will be available at: http://localhost:8080/graphiql
+
+TIP: Run with --continuous flag for automatic reload on code changes:
+     ./gradlew --continuous serve
+```
+
+**GraphiQL Interface:**
+
+Navigate to `http://localhost:8080/graphiql` to access:
+- Query editor with syntax highlighting
+- Schema documentation browser
+- Query history
+- Variable editor
+- Response viewer
+
+**Dependencies:**
+
+The task automatically includes:
+- Ktor server (Netty)
+- Content negotiation (Jackson)
+- CORS support
+- WebSocket support
+- Your application classes and dependencies
+
+**System Properties:**
+
+<ResponseField name="serve.port" type="Int">
+  Port to bind (default: 8080)
+</ResponseField>
+
+<ResponseField name="serve.host" type="String">
+  Host to bind (default: localhost)
+</ResponseField>
+
+<ResponseField name="serve.packagePrefix" type="String">
+  Package prefix for module discovery (from `modulePackagePrefix`)
+</ResponseField>
+
+---
+
+### scaffold
+
+Generates a new Viaduct project structure with example code.
+
+**Type:** `ScaffoldTask`
+
+**Usage:**
+
+```bash
+# Generate with defaults
+./gradlew scaffold
+
+# Custom package and output directory
+./gradlew scaffold \
+  -PpackagePrefix=com.mycompany.api \
+  -PoutputDir=./my-viaduct-app
+```
+
+**Parameters:**
+
+<ParamField path="packagePrefix" type="String">
+  Base package name for generated code
+  
+  **Default:** `"com.example.myapp"`
+  
+  **Example:** `"com.mycompany.api"`
+</ParamField>
+
+<ParamField path="outputDir" type="String">
+  Output directory for scaffolded project
+  
+  **Default:** `"scaffold-output"`
+</ParamField>
+
+<ParamField path="gradleVersion" type="String">
+  Gradle version for the scaffolded project
+  
+  **Default:** Latest stable
+</ParamField>
+
+**Generated Structure:**
+
+```
+scaffold-output/
+  ├── build.gradle.kts
+  ├── settings.gradle.kts
+  ├── gradle.properties
+  ├── src/main/kotlin/.../
+  │   ├── Application.kt        # Example Ktor application
+  │   └── ViaductConfig.kt      # Viaduct setup
+  ├── modules/
+  │   └── example/
+  │       ├── build.gradle.kts
+  │       └── src/
+  │           ├── main/viaduct/schema/
+  │           │   └── Example.graphqls   # Example schema
+  │           └── main/kotlin/.../
+  │               └── ExampleResolver.kt  # Example resolver
+  └── README.md
+```
+
+## Configurations
+
+### allSchemaPartitionsIncoming
+
+**Type:** Resolvable configuration
+
+**Purpose:** Receives schema partitions from all module plugins
+
+**Attributes:**
+- `viaductKind = SCHEMA_PARTITION`
+
+**Usage:** Automatically configured by module plugins
+
+---
+
+### centralSchemaOutgoing
+
+**Type:** Consumable configuration
+
+**Purpose:** Provides the central schema to module plugins (for resolver generation)
+
+**Artifacts:**
+- Output directory of `assembleViaductCentralSchema`
+
+**Structure:**
+```
+central-schema/
+  ├── BUILTIN_SCHEMA.graphqls
+  └── partition/
+      └── [module]/graphql/*.graphqls
+```
+
+---
+
+### grtClassesOutgoing
+
+**Type:** Consumable configuration
+
+**Purpose:** Provides GRT JAR to module plugins
+
+**Attributes:**
+- `viaductKind = GRT_CLASSES`
+- `usage = JAVA_RUNTIME`
+- `category = LIBRARY`
+- `libraryElements = JAR`
+
+**Artifacts:**
+- `viaduct-grt.jar` from `generateViaductGRTs`
+
+## Schema Locations
+
+### Base Schema (`src/main/viaduct/schemabase/`)
+
+Application-wide schema definitions that apply to all modules.
+
+**Use for:**
+- Custom directives
+- Shared interfaces
+- Common types
+- Application-specific scalars
+
+**Example:**
+
+```graphql
+# src/main/viaduct/schemabase/CustomDirectives.graphqls
+directive @auth(requires: Role!) on FIELD_DEFINITION
+
+enum Role {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+```
+
+### Common Schema (`src/viaduct/schema/`)
+
+Root-level Query/Mutation/Subscription extensions.
+
+**Use for:**
+- Global fields that don't belong to a specific module
+- Cross-module aggregations
+
+**Example:**
+
+```graphql
+# src/viaduct/schema/GlobalQuery.graphqls
+extend type Query {
+  health: String!
+  version: String!
+}
+```
+
+## Development Workflow
+
+### Initial Setup
+
+```bash
+# 1. Generate initial code
+./gradlew generateViaductGRTs
+
+# 2. Sync IDE
+./gradlew idea  # or sync in IntelliJ
+
+# 3. Start dev server
+./gradlew --continuous serve
+```
+
+### Making Schema Changes
+
+```bash
+# 1. Edit schema files in modules/*/src/main/viaduct/schema/
+
+# 2. With --continuous serve running:
+#    - Server auto-reloads on schema changes
+#    - Resolver bases regenerate automatically
+
+# 3. Implement new/updated resolvers
+
+# 4. Test in GraphiQL at http://localhost:8080/graphiql
+```
+
+### Build for Production
+
+```bash
+# Clean build with all code generation
+./gradlew clean build
+
+# Produces:
+# - build/libs/myapp.jar (application JAR)
+# - build/libs/viaduct-grt.jar (GRT classes)
+```
+
+## Best Practices
+
+### Do
+
+- **Use `--continuous serve` for development** - Automatic reload on changes
+- **Set meaningful package names** - Use your organization's package structure
+- **Keep base schema minimal** - Only truly global definitions
+- **Version control generated GRT JAR** - Optional but useful for CI/CD
+- **Use GraphiQL for testing** - Faster than external tools
+
+### Don't
+
+- **Don't apply to non-root projects** - Only root project should use this plugin
+- **Don't modify generated GRT classes** - They're regenerated on every build
+- **Don't commit `build/` directory** - Except optionally the GRT JAR
+- **Don't skip schema validation** - Run full build before deploying
+
+## Troubleshooting
+
+### GRT classes not found
+
+**Solution:**
+```bash
+./gradlew generateViaductGRTs
+./gradlew idea  # Sync IDE
+```
+
+### Schema changes not reflected in serve
+
+**Solution:** Use `--continuous` flag:
+```bash
+./gradlew --continuous serve
+```
+
+### Module schemas not included
+
+**Solution:** Ensure modules:
+1. Apply the module plugin
+2. Are included in `settings.gradle.kts`
+3. Have schema files in `src/main/viaduct/schema/`
+
+### Port already in use
+
+**Solution:**
+```bash
+./gradlew serve -Pserve.port=3000
+```
+
+## See Also
+
+- [Module Plugin](module-plugin) - Plugin for individual modules
+- [Service API](service-api) - Integrating Viaduct into your service
+- [Tenant API](tenant-api) - Writing resolvers
+- [Directives](directives) - Schema directives

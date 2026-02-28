@@ -1,0 +1,420 @@
+---
+title: Central Schema
+description: How Viaduct enables teams to contribute to a single, unified GraphQL schema
+---
+
+## What is a Central Schema?
+
+Viaduct serves a **central schema**: a single, integrated GraphQL schema connecting all domains across your organization. While this schema is developed in a *decentralized* manner by many teams, it presents as one highly connected graph to clients.
+
+<Info>
+The central schema is the complete, unified GraphQL schema that results from merging all tenant module schemas together. It represents the full graph of your organization's data and capabilities.
+</Info>
+
+## Key Principles
+
+<CardGroup cols={2}>
+  <Card title="Single Graph" icon="diagram-project">
+    One unified schema connecting all domains, not a collection of separate schemas
+  </Card>
+  
+  <Card title="Decentralized Development" icon="users">
+    Multiple teams independently contribute types and fields to the central schema
+  </Card>
+  
+  <Card title="Type Extensions" icon="puzzle-piece">
+    Teams can extend types owned by other teams without direct code dependencies
+  </Card>
+  
+  <Card title="Schema Composition" icon="layer-group">
+    All team schemas are merged at build time into the central schema
+  </Card>
+</CardGroup>
+
+## How Teams Contribute
+
+Teams contribute to the central schema through **tenant modules**. Each module contains:
+
+- GraphQL SDL files defining types, queries, mutations
+- Resolvers implementing the business logic for those fields
+- Independence from other modules' code
+
+### Example: Two Teams Collaborating
+
+Let's look at how two teams contribute to a `User` type:
+
+<CodeGroup>
+```graphql Core User Team
+// modules/universe/schema/User.graphqls
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  email: String
+}
+
+extend type Query {
+  user(id: ID!): User
+}
+```
+
+```graphql Messaging Team
+// modules/filmography/schema/UserExtensions.graphqls
+extend type User {
+  displayName: String @resolver
+  messageCount: Int @resolver
+}
+```
+</CodeGroup>
+
+After composition, the central schema contains:
+
+```graphql
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  email: String
+  # Fields added by Messaging team:
+  displayName: String
+  messageCount: Int
+}
+```
+
+<Note>
+The Messaging team's resolvers can access `firstName` and `lastName` through GraphQL fragments without depending on the Core User team's code.
+</Note>
+
+## Schema Composition Process
+
+Viaduct merges tenant schemas at build time through a multi-step process:
+
+<Steps>
+  <Step title="Discovery">
+    Scan all tenant module directories for `.graphqls` files in `src/main/viaduct/schema/`
+  </Step>
+  
+  <Step title="Collection">
+    Gather all SDL files per module, respecting module dependencies
+  </Step>
+  
+  <Step title="Merging">
+    Combine types using GraphQL's `extend` keyword, following type system rules
+  </Step>
+  
+  <Step title="Validation">
+    Ensure the composed schema is valid according to GraphQL specification
+  </Step>
+  
+  <Step title="Code Generation">
+    Generate GRTs and resolver base classes from the central schema
+  </Step>
+</Steps>
+
+### Module Dependencies
+
+Modules form a dependency graph that determines composition order:
+
+```
+presentation → data → entity → entity/common
+```
+
+When you build a tenant, Viaduct automatically includes schemas from ancestor modules:
+
+- Building `presentation/checkout` includes: `presentation`, `data`, `entity`, `entity/common`
+- Building `entity/user` includes: `entity`, `entity/common`
+
+<Warning>
+When extending types across modules, ensure the extending module depends on the module containing the original type definition.
+</Warning>
+
+## Real-World Example: Star Wars Demo
+
+The Star Wars demo application demonstrates central schema composition with two modules:
+
+### Universe Module
+
+Defines core Star Wars entities:
+
+```graphql modules/universe/src/main/viaduct/schema/Planet.graphqls
+type Planet implements Node @scope(to: ["default"]) @resolver {
+  id: ID!
+  name: String
+  diameter: Int
+  rotationPeriod: Int
+  orbitalPeriod: Int
+  gravity: Float
+  population: Float
+  surfaceWater: Float
+  terrains: [String]
+  climates: [String]
+  created: String
+  edited: String
+}
+
+extend type Query @scope(to: ["default"]) {
+  allPlanets(limit: Int): [Planet] @resolver
+}
+```
+
+### Filmography Module
+
+Extends entities with film-related fields:
+
+```graphql modules/filmography/src/main/viaduct/schema/Character.graphqls
+type Character implements Node @scope(to: ["default"]) @resolver {
+  id: ID!
+  name: String
+  birthYear: String
+  eyeColor: String
+  gender: String
+  hairColor: String
+  height: Int
+  mass: Float
+  created: String
+  edited: String
+  
+  # Filmography module adds these relationships:
+  isAdult: Boolean @resolver
+  homeworld: Planet @resolver
+  species: Species @resolver
+  displayName: String @resolver
+  filmCount: Int @resolver
+}
+
+extend type Query @scope(to: ["default"]) {
+  allCharacters(limit: Int): [Character] @resolver
+  searchCharacter(search: CharacterSearchInput!): Character @resolver
+}
+```
+
+<Info>
+Notice how the `Character` type references `Planet` and `Species` from the universe module. The central schema makes these cross-module relationships seamless.
+</Info>
+
+## Common Types and Shared Modules
+
+For types used across multiple tenants, create a common module:
+
+```graphql modules/common/schema/CommonTypes.graphqls
+type Address @scope(to: ["default"]) {
+  street: String!
+  city: String!
+  country: String!
+}
+
+type Money @scope(to: ["default"]) {
+  amount: BigDecimal!
+  currency: String!
+}
+
+type Coordinates @scope(to: ["default"]) {
+  latitude: Float!
+  longitude: Float!
+}
+```
+
+All modules depending on `common` can reference these types:
+
+```graphql
+type Listing {
+  id: ID!
+  title: String!
+  address: Address      # References common type
+  price: Money          # References common type
+  location: Coordinates # References common type
+}
+```
+
+## Schema Variants with Scopes
+
+The central schema can expose different variants using **scopes**. All tenants contribute to the same central schema, but fields can be marked with different scopes:
+
+```graphql
+type Species @scope(to: ["default"]) {
+  id: ID!
+  name: String
+  classification: String
+  
+  # Only visible in "extras" schema:
+  technologicalLevel: String @scope(to: ["extras"])
+  culturalNotes: String @scope(to: ["extras"])
+  rarityLevel: String @scope(to: ["extras"])
+}
+```
+
+### Registering Schema Variants
+
+Service engineers configure which scopes map to which schema IDs:
+
+```kotlin
+val schemaConfig = SchemaConfiguration.builder()
+    .registerSchema(
+        schemaId = "PUBLIC_SCHEMA",
+        scopes = setOf("default")
+    )
+    .registerSchema(
+        schemaId = "PUBLIC_SCHEMA_WITH_EXTRAS",
+        scopes = setOf("default", "extras")
+    )
+    .build()
+```
+
+At runtime, the controller selects which schema variant to use:
+
+```kotlin
+val schemaId = when {
+    request.scopes.contains("extras") -> "PUBLIC_SCHEMA_WITH_EXTRAS"
+    else -> "PUBLIC_SCHEMA"
+}
+
+val result = viaduct.execute(executionInput, schemaId)
+```
+
+<Tip>
+Scopes provide schema visibility control without creating separate graphs. All teams still contribute to the same central schema.
+</Tip>
+
+## Benefits of a Central Schema
+
+### For Developers
+
+<CardGroup cols={2}>
+  <Card title="One Graph" icon="diagram-project">
+    Query across domains in a single request without orchestrating multiple services
+  </Card>
+  
+  <Card title="Type Safety" icon="shield">
+    Strong typing across module boundaries with generated code
+  </Card>
+  
+  <Card title="No Duplication" icon="clone">
+    Shared types prevent duplicate definitions across teams
+  </Card>
+  
+  <Card title="Discovery" icon="magnifying-glass">
+    Browse the entire graph through introspection
+  </Card>
+</CardGroup>
+
+### For Organizations
+
+- **Faster Development**: Teams extend existing types instead of creating new APIs
+- **Better Client Experience**: Single endpoint for all data needs
+- **Reduced Coordination**: Teams work independently on their schema portions
+- **Consistent Data Model**: One source of truth for your domain model
+
+## Schema Governance
+
+With a central schema, consider these governance practices:
+
+### Naming Conventions
+
+Establish consistent naming for types and fields:
+
+```graphql
+# Good: Descriptive, consistent naming
+type ListingReservation {
+  id: ID!
+  checkInDate: Date!
+  checkOutDate: Date!
+}
+
+# Avoid: Inconsistent or unclear naming
+type Reservation {
+  id: ID!
+  start: String  # What format? Date or DateTime?
+  finish: String
+}
+```
+
+### Field Ownership
+
+Clearly document which team owns each type:
+
+```graphql
+"""
+User entity owned by the Core User team.
+Contact @core-user-team before extending.
+"""
+type User implements Node {
+  id: ID!
+  # ...
+}
+```
+
+### Breaking Change Prevention
+
+<Warning>
+Removing or renaming fields in the central schema is a breaking change. Use deprecation instead:
+</Warning>
+
+```graphql
+type User {
+  id: ID!
+  # Deprecated - use displayName instead
+  name: String @deprecated(reason: "Use displayName")
+  displayName: String
+}
+```
+
+### Schema Reviews
+
+Implement review processes for schema changes:
+
+- **Automated validation**: Check for breaking changes in CI
+- **Type ownership**: Require approval from owning team for extensions
+- **Naming review**: Ensure consistency with existing conventions
+
+## Compilation Schemas
+
+While Viaduct maintains a central schema, each tenant module only generates code for the types it actually uses:
+
+<Info>
+A **compilation schema** is a per-tenant-module, private view of the central schema consisting of only the schema elements that module uses.
+</Info>
+
+This optimization:
+
+- Keeps build times fast even with a large central schema
+- Enables parallel builds of tenant modules
+- Only rebuilds when a module's dependencies change
+
+Example:
+
+- Central schema has 500 types
+- `filmography/characters` module only uses 20 types
+- Only those 20 types (and their dependencies) are in the compilation schema
+- Generated code is minimal and builds quickly
+
+## Troubleshooting
+
+### Type Not Found Errors
+
+If you get "unresolved reference" errors for a type:
+
+1. Ensure the module defining that type is in your dependencies
+2. Check that schema files are in the correct location: `src/main/viaduct/schema/`
+3. Verify the type is included in your scope configuration
+
+### Duplicate Type Definitions
+
+If you see "type already defined" errors:
+
+1. Use `extend type` instead of redefining the type
+2. Check that only one module defines the base type
+3. Review module dependencies to ensure proper composition order
+
+### Schema Composition Failures
+
+If schema validation fails after composition:
+
+1. Run introspection queries to examine the composed schema
+2. Check for conflicting field definitions on extended types
+3. Ensure all referenced types are defined or extended with proper scopes
+
+## See Also
+
+- [Tenant Modules](/concepts/tenant-modules) - Building modular applications with isolated schemas
+- [Re-entrancy](/concepts/re-entrancy) - How modules compose through GraphQL fragments
+- [Architecture](/concepts/architecture) - Understanding the three-layer design

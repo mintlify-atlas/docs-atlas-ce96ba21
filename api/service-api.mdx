@@ -1,0 +1,407 @@
+---
+title: Service API
+description: Main entry point for executing GraphQL operations with Viaduct
+---
+
+The Service API (`viaduct.service.api`) provides the primary interfaces for **service engineers** who integrate Viaduct into their organization's tech stack. This API defines how to execute GraphQL operations, configure schemas, and integrate with infrastructure like observability and security.
+
+## Overview
+
+The Service API is the boundary between your web server (or service layer) and the Viaduct GraphQL runtime. Key responsibilities:
+
+- Execute GraphQL operations via the `Viaduct` interface
+- Configure execution input (query text, variables, request context)
+- Handle execution results (data, errors, extensions)
+- Manage schema variants and scopes
+
+## Core Interfaces
+
+### Viaduct
+
+The main entry point for executing GraphQL operations against the Viaduct runtime.
+
+```kotlin
+interface Viaduct {
+    suspend fun executeAsync(executionInput: ExecutionInput, schemaId: SchemaId = SchemaId.Full): CompletableFuture<ExecutionResult>
+    fun execute(executionInput: ExecutionInput, schemaId: SchemaId = SchemaId.Full): ExecutionResult
+    fun getAppliedScopes(schemaId: SchemaId): Set<String>?
+}
+```
+
+**Package:** `viaduct.service.api`
+
+**Stability:** Stable
+
+**Creation:**
+
+Instances are created via:
+- `ViaductBuilder` - For full SPI control and advanced configuration
+- `BasicViaductFactory` - For simpler use cases with sensible defaults
+
+A typical integration creates a single `Viaduct` instance at startup and routes incoming GraphQL requests through its execute methods.
+
+#### Methods
+
+<ResponseField name="executeAsync" type="suspend (ExecutionInput, SchemaId) -> CompletableFuture<ExecutionResult>">
+  Executes a GraphQL operation asynchronously.
+  
+  **Parameters:**
+  - `executionInput: ExecutionInput` - The execution input for this operation
+  - `schemaId: SchemaId` - The schema variant to execute against (defaults to `SchemaId.Full`)
+  
+  **Returns:** `CompletableFuture<ExecutionResult>` with errors sorted by path then by message
+  
+  **Example:**
+  ```kotlin
+  val input = ExecutionInput.create(
+      operationText = "{ user(id: \"123\") { name } }"
+  )
+  val result = viaduct.executeAsync(input).await()
+  ```
+</ResponseField>
+
+<ResponseField name="execute" type="(ExecutionInput, SchemaId) -> ExecutionResult">
+  Executes a GraphQL operation synchronously.
+  
+  **Parameters:**
+  - `executionInput: ExecutionInput` - The execution input for this operation
+  - `schemaId: SchemaId` - The schema variant to execute against (defaults to `SchemaId.Full`)
+  
+  **Returns:** `ExecutionResult` with errors sorted by path then by message
+  
+  **Example:**
+  ```kotlin
+  val input = ExecutionInput.create(
+      operationText = query,
+      variables = mapOf("id" to userId)
+  )
+  val result = viaduct.execute(input)
+  ```
+</ResponseField>
+
+<ResponseField name="getAppliedScopes" type="(SchemaId) -> Set<String>?">
+  Returns the set of scope IDs applied to the given schema, or null if no scopes are configured.
+  
+  **Parameters:**
+  - `schemaId: SchemaId` - The schema whose applied scopes to retrieve
+  
+  **Returns:** Set of scope IDs, or null
+</ResponseField>
+
+### ExecutionInput
+
+Encapsulates the parameters necessary to execute a GraphQL operation.
+
+```kotlin
+interface ExecutionInput {
+    val operationText: String
+    val operationName: String?
+    val operationId: String
+    val variables: Map<String, Any?>
+    val executionId: String
+    val requestContext: Any?
+}
+```
+
+**Package:** `viaduct.service.api`
+
+**Stability:** Stable
+
+#### Properties
+
+<ResponseField name="operationText" type="String" required>
+  Text of an executable GraphQL document as defined in the GraphQL specification.
+  
+  **Example:**
+  ```kotlin
+  "query GetUser($id: ID!) { user(id: $id) { name email } }"
+  ```
+</ResponseField>
+
+<ResponseField name="operationName" type="String?">
+  Name of the operation in `operationText` to execute. May be null if `operationText` contains only one operation.
+</ResponseField>
+
+<ResponseField name="operationId" type="String" required>
+  A unique ID for the operation, used for instrumentation and caching. Auto-generated from operation text if not provided.
+</ResponseField>
+
+<ResponseField name="variables" type="Map<String, Any?>">
+  Values for variables defined by the operation. Defaults to empty map.
+</ResponseField>
+
+<ResponseField name="executionId" type="String" required>
+  Unique request identifier for this execution. Auto-generated UUID if not provided.
+</ResponseField>
+
+<ResponseField name="requestContext" type="Any?">
+  Deployment-specific request context established by service engineers. Available to application code through execution contexts.
+  
+  **Usage:** Store authentication, authorization, tracing, or other request-scoped data. While dependency injection is preferred, this provides a simpler alternative.
+  
+  **Example:**
+  ```kotlin
+  data class RequestContext(
+      val userId: String,
+      val authToken: String,
+      val traceId: String
+  )
+  
+  val input = ExecutionInput.create(
+      operationText = query,
+      requestContext = RequestContext(userId, token, traceId)
+  )
+  ```
+</ResponseField>
+
+#### Builder Pattern
+
+<ResponseField name="builder()" type="() -> ExecutionInput.Builder" static>
+  Creates a new Builder instance for constructing ExecutionInput objects.
+  
+  **Example:**
+  ```kotlin
+  val input = ExecutionInput.builder()
+      .operationText(query)
+      .operationName("GetUser")
+      .variables(mapOf("id" to "123"))
+      .requestContext(context)
+      .build()
+  ```
+</ResponseField>
+
+<ResponseField name="create()" type="(String, String?, Map<String, Any?>?, Any?) -> ExecutionInput" static>
+  Convenience factory method for simple cases.
+  
+  **Parameters:**
+  - `operationText: String` (required)
+  - `operationName: String?` (optional)
+  - `variables: Map<String, Any?>` (defaults to empty)
+  - `requestContext: Any?` (optional)
+  
+  **Example:**
+  ```kotlin
+  val input = ExecutionInput.create(
+      operationText = "{ user(id: \"123\") { name } }",
+      variables = mapOf("id" to "123")
+  )
+  ```
+</ResponseField>
+
+### ExecutionResult
+
+The result of executing a GraphQL operation through Viaduct.
+
+```kotlin
+interface ExecutionResult {
+    fun getData(): Map<String, Any?>?
+    val errors: List<GraphQLError>
+    val extensions: Map<Any, Any?>?
+    fun toSpecification(): Map<String, Any?>
+}
+```
+
+**Package:** `viaduct.service.api`
+
+**Stability:** Stable
+
+**Important:** This is a Viaduct-specific wrapper that does not expose GraphQL Java types directly.
+
+#### Data and Errors Relationship
+
+- If `getData()` returns `null`, `errors` will contain at least one error explaining why
+- If `getData()` returns data, `errors` may still contain errors for fields that failed (partial results)
+
+#### Partial Results
+
+GraphQL supports partial results (GraphQL Spec §6.4.4): if a nullable field encounters an error, it returns `null` but execution continues. The error is recorded in `errors` while other fields retain their data. Only errors in non-nullable fields cause null to bubble up to parent fields.
+
+#### Methods and Properties
+
+<ResponseField name="getData()" type="() -> Map<String, Any?>?">
+  Returns the data from the GraphQL execution.
+  
+  The structure is `Map<String, Any?>` where keys are top-level field names from the query.
+  
+  **Nested value mappings:**
+  - GraphQL Objects → `Map<String, Any?>`
+  - GraphQL Lists → `List<Any?>`
+  - GraphQL Scalars → String, Int, Boolean, Double, etc.
+  - GraphQL Nulls → `null`
+  
+  **Returns:** The execution data, or `null` if execution failed at the root level
+  
+  **Example:**
+  Given query:
+  ```graphql
+  query {
+    user(id: "123") {
+      name
+      posts { title }
+    }
+  }
+  ```
+  
+  Returns:
+  ```kotlin
+  mapOf(
+    "user" to mapOf(
+      "name" to "Alice",
+      "posts" to listOf(mapOf("title" to "First Post"))
+    )
+  )
+  ```
+</ResponseField>
+
+<ResponseField name="errors" type="List<GraphQLError>">
+  Errors that occurred during execution, sorted by path and then by message.
+  
+  This list is non-empty when:
+  - `getData()` returns `null` (at least one error will explain why)
+  - Partial results occurred (nullable fields that encountered errors)
+  - Validation or parsing failed
+</ResponseField>
+
+<ResponseField name="extensions" type="Map<Any, Any?>?">
+  Additional execution metadata as key-value pairs. Use for custom metrics, tracing data, or other metadata.
+</ResponseField>
+
+<ResponseField name="toSpecification()" type="() -> Map<String, Any?>">
+  Converts this result to the standard GraphQL specification format. This produces a map suitable for JSON serialization in HTTP responses.
+  
+  **Example:**
+  ```kotlin
+  val specResult = result.toSpecification()
+  return ResponseEntity.ok(objectMapper.writeValueAsString(specResult))
+  ```
+</ResponseField>
+
+### GraphQLError
+
+Viaduct's representation of a GraphQL error.
+
+```kotlin
+data class GraphQLError(
+    val message: String,
+    val path: List<Any>? = null,
+    val locations: List<SourceLocation>? = null,
+    val extensions: Map<String, Any?> = emptyMap()
+)
+```
+
+**Package:** `viaduct.service.api`
+
+**Stability:** Stable
+
+<ParamField path="message" type="String" required>
+  The error message to display to clients
+</ParamField>
+
+<ParamField path="path" type="List<Any>?">
+  The execution path where the error occurred (e.g., `["user", "profile", "name"]`)
+</ParamField>
+
+<ParamField path="locations" type="List<SourceLocation>?">
+  Source locations in the GraphQL query where the field was requested
+</ParamField>
+
+<ParamField path="extensions" type="Map<String, Any?>">
+  Additional error metadata (e.g., error codes, localized messages, custom fields)
+</ParamField>
+
+### SchemaId
+
+Identifies which schema variant to use when executing a GraphQL operation.
+
+```kotlin
+abstract class SchemaId(open val id: String)
+```
+
+**Package:** `viaduct.service.api`
+
+**Stability:** Stable
+
+Viaduct supports multiple schema variants for a single service:
+
+<ResponseField name="Full" type="SchemaId" static>
+  The default, complete schema containing all types and fields.
+  
+  **Example:**
+  ```kotlin
+  viaduct.execute(input, SchemaId.Full)
+  ```
+</ResponseField>
+
+<ResponseField name="Scoped" type="data class" static>
+  A subset of the full schema restricted by a set of scope IDs. Useful for multi-tenancy or permission-based field visibility.
+  
+  **Properties:**
+  - `id: String` - The schema ID
+  - `scopeIds: Set<String>` - The set of scope IDs the schema is scoped to
+  
+  **Example:**
+  ```kotlin
+  val schemaId = SchemaId.Scoped(
+      id = "public-api",
+      scopeIds = setOf("default", "public")
+  )
+  viaduct.execute(input, schemaId)
+  ```
+</ResponseField>
+
+<ResponseField name="None" type="SchemaId" static>
+  Represents a non-existent schema, used as a sentinel value.
+</ResponseField>
+
+## Integration Example
+
+Here's a complete example of integrating Viaduct into a REST controller:
+
+```kotlin
+@RestController
+class GraphQLController(
+    private val viaduct: Viaduct,
+    private val objectMapper: ObjectMapper
+) {
+    @PostMapping("/graphql")
+    fun handleGraphQL(
+        @RequestBody request: GraphQLRequest,
+        @RequestHeader headers: HttpHeaders
+    ): ResponseEntity<String> {
+        // Build request context
+        val requestContext = RequestContext(
+            userId = headers.getFirst("X-User-Id"),
+            authToken = headers.getFirst("Authorization")
+        )
+        
+        // Create execution input
+        val input = ExecutionInput.builder()
+            .operationText(request.query)
+            .operationName(request.operationName)
+            .variables(request.variables ?: emptyMap())
+            .requestContext(requestContext)
+            .build()
+        
+        // Execute operation
+        val result = viaduct.execute(input)
+        
+        // Return spec-compliant response
+        val specResult = result.toSpecification()
+        return ResponseEntity.ok(
+            objectMapper.writeValueAsString(specResult)
+        )
+    }
+}
+
+data class GraphQLRequest(
+    val query: String,
+    val operationName: String? = null,
+    val variables: Map<String, Any?>? = null
+)
+```
+
+## See Also
+
+- [Tenant API](tenant-api) - Interfaces for implementing resolvers
+- [Engine API](engine-api) - Core execution engine
+- [Application Plugin](application-plugin) - Gradle plugin for Viaduct applications

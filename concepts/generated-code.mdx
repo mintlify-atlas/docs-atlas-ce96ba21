@@ -1,0 +1,719 @@
+---
+title: Generated Code & GRTs
+description: Understanding GraphQL Representational Types (GRTs) and compilation schemas
+---
+
+## What are GRTs?
+
+Viaduct generates **GraphQL Representational Types (GRTs)** - Kotlin classes that represent GraphQL types in a type-safe, ergonomic way. Every GraphQL type in your schema gets a corresponding GRT with builders and accessor methods.
+
+<Info>
+GRT stands for "GraphQL Representational Type." These are the generated Kotlin classes you use to read query results and construct response objects in your resolvers.
+</Info>
+
+## Generated Classes
+
+For each GraphQL type, Viaduct generates two classes:
+
+<CardGroup cols={2}>
+  <Card title="Value Class" icon="box">
+    Represents an instance of the type with suspending getter methods
+  </Card>
+  
+  <Card title="Builder Class" icon="hammer">
+    Constructs instances with type-safe setter methods
+  </Card>
+</CardGroup>
+
+### Example: User Type
+
+Given this GraphQL schema:
+
+```graphql
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  email: String!
+  displayName: String
+}
+```
+
+Viaduct generates:
+
+```kotlin Generated: viaduct.api.grts.User
+package viaduct.api.grts
+
+class User private constructor(...): NodeObject {
+    // Suspending getters for accessing field values
+    suspend fun getId(alias: String? = null): GlobalID<User>
+    suspend fun getFirstName(alias: String? = null): String?
+    suspend fun getLastName(alias: String? = null): String?
+    suspend fun getEmail(alias: String? = null): String
+    suspend fun getDisplayName(alias: String? = null): String?
+    
+    // Builder for constructing instances
+    class Builder(ctx: ExecutionContext): DynamicValueOutputBuilder<User> {
+        fun id(id: GlobalID<User>): Builder
+        fun firstName(firstName: String?): Builder
+        fun lastName(lastName: String?): Builder
+        fun email(email: String): Builder
+        fun displayName(displayName: String?): Builder
+        override fun build(): User
+    }
+}
+```
+
+## Output Types (Object, Interface, Union)
+
+### Object Types
+
+Object type GRTs implement `NodeObject` and provide suspending getters:
+
+```kotlin Using a GRT
+@Resolver("fragment _ on User { firstName lastName }")
+class DisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        // Access fields via suspending getters
+        val first = ctx.objectValue.getFirstName()
+        val last = ctx.objectValue.getLastName()
+        return "$first $last"
+    }
+}
+```
+
+<Warning>
+**UnsetFieldException**: If you access a field not declared in your `@Resolver` fragment, an `UnsetFieldException` will be thrown at runtime, even if the field is nullable.
+</Warning>
+
+### Interface Types
+
+Interface GRTs are Kotlin interfaces with suspending getters but no builders:
+
+```graphql
+interface Node {
+  id: ID!
+}
+
+type User implements Node {
+  id: ID!
+  firstName: String
+}
+```
+
+```kotlin Generated Interface GRT
+interface Node {
+    suspend fun getId(alias: String? = null): GlobalID<Node>
+}
+
+class User private constructor(...): Node, NodeObject {
+    override suspend fun getId(alias: String? = null): GlobalID<User>
+    suspend fun getFirstName(alias: String? = null): String?
+    // ...
+}
+```
+
+### Union Types
+
+Union GRTs are Kotlin tagging interfaces with no members:
+
+```graphql
+union SearchResult = User | Listing | Experience
+```
+
+```kotlin Generated Union GRT
+interface SearchResult  // Tagging interface only
+
+// Implementing types
+class User(...): SearchResult, NodeObject { ... }
+class Listing(...): SearchResult, NodeObject { ... }
+class Experience(...): SearchResult, NodeObject { ... }
+```
+
+Access union members via type checks:
+
+```kotlin
+val result: SearchResult = ctx.objectValue.getResult()
+when (result) {
+    is User -> "User: ${result.getFirstName()}"
+    is Listing -> "Listing: ${result.getTitle()}"
+    is Experience -> "Experience: ${result.getName()}"
+    else -> "Unknown type"
+}
+```
+
+## Input Types
+
+Input type GRTs use Kotlin properties (not suspending getters) and have stricter builders:
+
+```graphql
+input CreateUserInput {
+  firstName: String!
+  lastName: String!
+  email: String!
+  age: Int
+}
+```
+
+```kotlin Generated Input GRT
+class CreateUserInput private constructor(...) {
+    // Properties, not suspend functions
+    val firstName: String
+    val lastName: String
+    val email: String
+    val age: Int?
+    
+    class Builder {
+        fun firstName(firstName: String): Builder
+        fun lastName(lastName: String): Builder
+        fun email(email: String): Builder
+        fun age(age: Int?): Builder
+        
+        // Throws error if required fields not set
+        fun build(): CreateUserInput
+    }
+}
+```
+
+<Note>
+Input object builders require all non-nullable fields without defaults to be set. Calling `build()` without setting required fields throws a runtime error.
+</Note>
+
+### Accessing Input Arguments
+
+```kotlin
+@Resolver
+class CreateUserResolver : MutationResolvers.CreateUser() {
+    override suspend fun resolve(ctx: Context): User {
+        // Access input via ctx.arguments
+        val input = ctx.arguments.input
+        
+        // Properties available immediately (not suspend)
+        val firstName = input.firstName
+        val lastName = input.lastName
+        val email = input.email
+        val age = input.age  // Nullable
+        
+        // Create user...
+    }
+}
+```
+
+## Connection and Edge Types
+
+Types marked with `@connection` and `@edge` generate GRTs implementing pagination interfaces:
+
+```graphql
+type UserConnection @connection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+}
+
+type UserEdge @edge {
+  node: User!
+  cursor: String!
+}
+```
+
+```kotlin Generated Connection GRT
+class UserConnection private constructor(
+    ...
+): Connection<UserEdge, User> {
+    suspend fun getEdges(alias: String? = null): List<UserEdge>
+    suspend fun getPageInfo(alias: String? = null): PageInfo
+}
+```
+
+```kotlin Generated Edge GRT
+class UserEdge private constructor(
+    ...
+): Edge<User> {
+    suspend fun getNode(alias: String? = null): User
+    suspend fun getCursor(alias: String? = null): String
+}
+```
+
+### Building Connections
+
+Use builder utilities for pagination:
+
+```kotlin
+@Resolver
+class AllUsersResolver : QueryResolvers.AllUsers() {
+    override suspend fun resolve(ctx: Context): UserConnection {
+        val users = repository.getUsers(
+            first = ctx.arguments.first,
+            after = ctx.arguments.after
+        )
+        
+        // Use fromSlice helper
+        return UserConnection.Builder(ctx)
+            .fromSlice(
+                slice = users,
+                nodeBuilder = { user -> 
+                    UserBuilder(ctx).build(user)
+                }
+            )
+            .build()
+    }
+}
+```
+
+<Tip>
+Viaduct provides helpers like `fromSlice()`, `fromEdges()`, and `fromList()` for building connection responses. See the [Pagination guide](/docs/developers/pagination) for details.
+</Tip>
+
+## Compilation Schemas
+
+While Viaduct maintains a central schema, each tenant module only generates code for types it actually uses:
+
+<Info>
+A **compilation schema** is a per-tenant-module, private view of the central schema consisting of only the schema elements used by that module. This makes Viaduct builds fast and scalable.
+</Info>
+
+### Why Compilation Schemas?
+
+Consider a large organization:
+
+- **Central schema**: 500 types across all domains
+- **Listings module**: Uses 20 types (Listing, User, Review, Photo, etc.)
+- **Payments module**: Uses 15 types (Payment, User, Transaction, etc.)
+
+Without compilation schemas:
+
+- Every module generates code for all 500 types
+- Builds are slow (generating + compiling 500 types × modules)
+- Changes to unused types trigger rebuilds
+
+With compilation schemas:
+
+- Listings module generates only its 20 types
+- Payments module generates only its 15 types
+- Builds are fast and parallelizable
+- Changes only rebuild affected modules
+
+### How Compilation Schemas Work
+
+<Steps>
+  <Step title="Import Analysis">
+    Viaduct scans your resolver source code for `import viaduct.api.grts.*` statements
+  </Step>
+  
+  <Step title="Dependency Tracing">
+    Traces type dependencies (if you use `User`, include types it references)
+  </Step>
+  
+  <Step title="Schema Subset">
+    Creates a subset schema containing only used types and their dependencies
+  </Step>
+  
+  <Step title="Code Generation">
+    Generates GRTs only for types in the compilation schema
+  </Step>
+</Steps>
+
+### Example
+
+Suppose your resolver imports:
+
+```kotlin
+import viaduct.api.grts.User
+import viaduct.api.grts.Listing
+```
+
+Compilation schema includes:
+
+- `User` (explicitly imported)
+- `Listing` (explicitly imported)
+- `Node` (both implement it)
+- `Address` (if `User` has an `address` field)
+- `Money` (if `Listing` has a `price` field)
+- Any other transitively referenced types
+
+Compilation schema excludes:
+
+- `Payment`, `Reservation`, `Experience`, etc. (not used)
+
+<Note>
+Compilation schemas are always valid, self-contained GraphQL schemas. They're not just a subset of types - they include all dependencies needed for those types.
+</Note>
+
+## Resolver Base Classes
+
+Beyond GRTs, Viaduct generates resolver base classes you extend:
+
+### Per-Type Resolver Container
+
+For each type, a container class groups all field resolvers:
+
+```kotlin Generated: CharacterResolvers.kt
+abstract class CharacterResolvers {
+    // Base class for displayName field resolver
+    abstract class DisplayName : FieldResolver<
+        Character,           // Object type
+        Query,              // Query type
+        DisplayNameArgs,    // Arguments type
+        String              // Return type
+    > {
+        abstract suspend fun resolve(ctx: Context): String?
+    }
+    
+    // Base class for filmCount field resolver
+    abstract class FilmCount : FieldResolver<
+        Character,
+        Query,
+        FilmCountArgs,
+        Int
+    > {
+        abstract suspend fun resolve(ctx: Context): Int?
+    }
+    
+    // Base class for homeworld field resolver
+    abstract class Homeworld : FieldResolver<
+        Character,
+        Query,
+        HomeworldArgs,
+        Planet
+    > {
+        abstract suspend fun resolve(ctx: Context): Planet?
+    }
+}
+```
+
+Your implementations:
+
+```kotlin
+@Resolver("name")
+class CharacterDisplayNameResolver : CharacterResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        return ctx.objectValue.getName()
+    }
+}
+
+@Resolver("fragment _ on Character { homeworldId }")
+class CharacterHomeworldResolver @Inject constructor(
+    private val planetRepository: PlanetRepository
+) : CharacterResolvers.Homeworld() {
+    override suspend fun batchResolve(
+        contexts: List<Context>
+    ): List<FieldValue<Planet>> {
+        val planetIds = contexts.map { it.objectValue.getHomeworldId() }
+        val planets = planetRepository.findByIds(planetIds)
+        
+        return contexts.map { ctx ->
+            val planetId = ctx.objectValue.getHomeworldId()
+            FieldValue.ofValue(planets[planetId]!!)
+        }
+    }
+}
+```
+
+### Node Resolver Base Classes
+
+For types implementing `Node`, a node resolver base is generated:
+
+```kotlin Generated: NodeResolvers.kt
+abstract class NodeResolvers {
+    abstract class Character : NodeResolver<
+        viaduct.api.grts.Character
+    > {
+        abstract suspend fun resolve(ctx: Context): Character
+        
+        // Optional: implement for batching
+        open suspend fun batchResolve(
+            contexts: List<Context>
+        ): List<FieldValue<Character>> {
+            return contexts.map { ctx ->
+                FieldValue.ofValue(resolve(ctx))
+            }
+        }
+    }
+}
+```
+
+Implementation:
+
+```kotlin
+@Resolver
+class CharacterNodeResolver @Inject constructor(
+    private val repository: CharacterRepository
+) : NodeResolvers.Character() {
+    override suspend fun batchResolve(
+        contexts: List<Context>
+    ): List<FieldValue<Character>> {
+        val ids = contexts.map { it.id.internalID }
+        val characters = repository.findByIds(ids)
+        
+        return contexts.map { ctx ->
+            characters[ctx.id.internalID]?.let {
+                FieldValue.ofValue(CharacterBuilder(ctx).build(it))
+            } ?: FieldValue.ofError(
+                IllegalArgumentException("Character not found")
+            )
+        }
+    }
+}
+```
+
+## Code Structure and Packages
+
+Generated code is organized into packages:
+
+### viaduct.api.grts
+
+Contains all GRT value and builder classes:
+
+```
+viaduct.api.grts/
+├── User.kt
+├── Listing.kt
+├── Reservation.kt
+├── Address.kt
+├── Money.kt
+└── ...
+```
+
+### &lt;module-prefix&gt;.resolverbases
+
+Contains resolver base classes:
+
+```
+com.example.starwars.filmography.resolverbases/
+├── CharacterResolvers.kt
+├── FilmResolvers.kt
+├── QueryResolvers.kt
+├── MutationResolvers.kt
+└── NodeResolvers.kt
+```
+
+### Build Output Location
+
+Generated code is written to:
+
+```
+build/generated-sources/viaduct/
+├── grts/                    # GRT classes
+└── resolverBases/           # Resolver base classes
+```
+
+Your IDE should automatically mark these as source directories.
+
+## Working with Generated Code
+
+### Reading Values
+
+Access fields via suspending getters:
+
+```kotlin
+@Resolver("fragment _ on User { firstName lastName email }")
+class UserSummaryResolver : UserResolvers.Summary() {
+    override suspend fun resolve(ctx: Context): String {
+        val user = ctx.objectValue
+        
+        // All getters are suspend functions
+        val name = "${user.getFirstName()} ${user.getLastName()}"
+        val email = user.getEmail()
+        
+        return "$name <$email>"
+    }
+}
+```
+
+### Building Values
+
+Construct instances using builders:
+
+```kotlin
+@Resolver
+class UserNodeResolver @Inject constructor(
+    private val userService: UserService
+) : NodeResolvers.User() {
+    override suspend fun resolve(ctx: Context): User {
+        val userId = ctx.id.internalID
+        val userData = userService.getUser(userId)
+        
+        // Use builder to construct GRT
+        return User.Builder(ctx)
+            .id(ctx.id)
+            .firstName(userData.firstName)
+            .lastName(userData.lastName)
+            .email(userData.email)
+            .build()
+    }
+}
+```
+
+<Warning>
+When building output objects, you don't need to set all fields - only set fields that are actually requested in the query. Viaduct tracks which fields are "set" internally.
+</Warning>
+
+### Handling Nullable Fields
+
+Nullable fields return Kotlin nullable types:
+
+```kotlin
+val firstName: String? = user.getFirstName()  // May be null
+
+val displayName = when {
+    firstName == null -> "Anonymous"
+    else -> firstName
+}
+```
+
+### Field Aliases
+
+Access aliased fields by passing the alias:
+
+```graphql
+query {
+  user(id: "123") {
+    givenName: firstName
+    familyName: lastName
+  }
+}
+```
+
+```kotlin
+val givenName = user.getFirstName(alias = "givenName")
+val familyName = user.getLastName(alias = "familyName")
+```
+
+## Type Safety Benefits
+
+<CardGroup cols={2}>
+  <Card title="Compile-Time Checks" icon="shield-check">
+    Type mismatches caught at compile time, not runtime
+  </Card>
+  
+  <Card title="IDE Support" icon="code">
+    Auto-completion, refactoring, and navigation work seamlessly
+  </Card>
+  
+  <Card title="Refactoring Safety" icon="rotate">
+    Renaming fields in schema updates all generated code
+  </Card>
+  
+  <Card title="No Stringly-Typed" icon="text-slash">
+    No string-based field access or dynamic typing
+  </Card>
+</CardGroup>
+
+### Example: Type Safety in Action
+
+```kotlin
+// Schema change: firstName: String -> givenName: String
+
+// OLD CODE (no longer compiles):
+val first = user.getFirstName()  // ❌ Compile error: Unresolved reference
+
+// NEW CODE (forced update):
+val first = user.getGivenName()  // ✓ Compiles
+```
+
+The compiler ensures all resolver code stays in sync with schema changes.
+
+## Performance Optimizations
+
+Generated code includes several performance optimizations:
+
+### Lazy Field Resolution
+
+Getters are suspending because fields resolve lazily:
+
+```kotlin
+val user = ctx.objectValue  // No resolution yet
+
+// Resolution happens here (suspends if not ready):
+val name = user.getFirstName()
+```
+
+### Batch-Friendly
+
+GRTs work seamlessly with batch resolvers:
+
+```kotlin
+override suspend fun batchResolve(
+    contexts: List<Context>
+): List<FieldValue<Planet>> {
+    // Access fields on all contexts before any suspend
+    val planetIds = contexts.map { 
+        it.objectValue.getHomeworldId()  // Suspends once for all
+    }
+    
+    // Batch load
+    val planets = repository.findByIds(planetIds)
+    
+    // Map results
+    return contexts.map { ctx ->
+        FieldValue.ofValue(planets[ctx.objectValue.getHomeworldId()]!!)
+    }
+}
+```
+
+### Minimal Memory Footprint
+
+GRTs are thin wrappers over the engine's dynamic representation, avoiding duplication.
+
+## Troubleshooting
+
+### UnsetFieldException
+
+**Problem**: Accessing a field not in your `@Resolver` fragment
+
+```kotlin
+@Resolver("fragment _ on User { firstName }")  // Only firstName!
+class Resolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        return ctx.objectValue.getLastName()  // ❌ UnsetFieldException
+    }
+}
+```
+
+**Solution**: Include all needed fields in your fragment:
+
+```kotlin
+@Resolver("fragment _ on User { firstName lastName }")
+class Resolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String {
+        return ctx.objectValue.getLastName()  // ✓ Works
+    }
+}
+```
+
+### Type Not Found
+
+**Problem**: Import statement for a GRT fails
+
+```kotlin
+import viaduct.api.grts.NewType  // ❌ Unresolved reference
+```
+
+**Solution**: Ensure the type is defined in your schema and the module is rebuilt:
+
+```bash
+./gradlew :modules:mymodule:build
+```
+
+### Build Errors After Schema Changes
+
+**Problem**: Resolvers fail to compile after schema changes
+
+**Solution**: This is expected! The type safety ensures code stays in sync. Update your resolvers to match the new schema:
+
+```kotlin
+// Schema changed: displayName: String -> fullName: String
+
+// Update resolver:
+class UserFullNameResolver : UserResolvers.FullName() {  // Was: DisplayName
+    override suspend fun resolve(ctx: Context): String? {
+        return "${ctx.objectValue.getFirstName()} ${ctx.objectValue.getLastName()}"
+    }
+}
+```
+
+## See Also
+
+- [Architecture](/concepts/architecture) - Understanding the three-layer design
+- [Tenant Modules](/concepts/tenant-modules) - How modules use generated code
+- [Re-entrancy](/concepts/re-entrancy) - Composing with fragments and subqueries
+- [Developer Guide: Generated Code](/docs/developers/generated_code) - Detailed implementation guide

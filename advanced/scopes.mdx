@@ -1,0 +1,379 @@
+---
+title: Schema Scopes
+description: Control schema visibility and create API variants using the @scope directive
+---
+
+Schema scopes provide a powerful mechanism for encapsulating parts of your GraphQL schema for information-hiding purposes. Using the `@scope` directive, you can expose different schema variants to different clients from a single Viaduct instance.
+
+## Overview
+
+Scopes enable you to:
+
+- Create public vs. internal API variants from the same codebase
+- Hide implementation details and internal fields
+- Support multi-tenant schema visibility
+- Gradually roll out new features to specific clients
+- Manage beta or experimental fields behind feature flags
+
+<Note>
+  Either nothing is scoped or **everything** has a scope applied to it. There is no default scope.
+</Note>
+
+## Common Use Cases
+
+Within a typical deployment, you might expose:
+
+- A `viaduct` scope with a comprehensive schema available to all internal systems
+- A `viaduct:public` scope with a smaller schema available to frontend clients
+- A `viaduct:internal-tools` scope for admin dashboards and tooling
+
+## Basic Usage
+
+The `@scope` directive is applied to types and fields to control visibility:
+
+```graphql
+type User @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  name: String
+  email: String
+}
+
+extend type User @scope(to: ["viaduct"]) {
+  internalNotes: String
+  adminFlags: [String]
+}
+```
+
+In this example:
+- `id`, `name`, and `email` are visible to both `viaduct` and `viaduct:public` scopes
+- `internalNotes` and `adminFlags` are only visible to the `viaduct` scope
+
+## Type Extensions for Scope Control
+
+Viaduct leverages GraphQL type extensions to separate fields within a type that belong to different scopes. This convention:
+
+- Avoids annotating each field individually
+- Optimizes for human readability
+- Clearly separates fields by intended audience
+
+### Example: Partial Field Exposure
+
+If you want to expose only some fields from a type to a public API:
+
+```graphql
+type Listing @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  title: String
+  photos: [Photo]
+}
+
+extend type Listing @scope(to: ["viaduct"]) {
+  internalStatus: String
+  moderation: ModerationData
+  hostId: ID!
+}
+
+type Photo @scope(to: ["viaduct", "viaduct:public"]) {
+  url: String!
+  caption: String
+}
+```
+
+## Multiple Schemas
+
+A single Viaduct instance can expose multiple schemas. Each schema is called a **scope set** and is identified by a **schema ID**.
+
+The schema seen by a request is controlled by the `schemaId` field of `ExecutionInput`:
+
+```kotlin
+val executionInput = ExecutionInput.Builder()
+    .schemaId("viaduct:public")  // or "viaduct", "viaduct:internal-tools", etc.
+    .query(query)
+    .variables(variables)
+    .build()
+
+val result = viaduct.execute(executionInput)
+```
+
+<Tip>
+  You can use as many schema IDs as you like with whatever naming scheme fits your use case.
+</Tip>
+
+## Guidelines for @scope Annotation
+
+### Always Append @scope to the Main Type
+
+When creating a new type (object, input, interface, union, or enum), always append `@scope` to the type itself:
+
+```graphql
+type User @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  firstName: String
+  lastName: String
+}
+
+enum Status @scope(to: ["viaduct", "admin"]) {
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+input CreateUserInput @scope(to: ["viaduct"]) {
+  firstName: String!
+  lastName: String!
+  email: String!
+}
+```
+
+All fields within the main type will be exposed to **all** the scopes defined in the `@scope` values.
+
+### Create Type Extensions for Narrower Scopes
+
+If you need to limit visibility for certain fields, create a type extension and move those fields:
+
+```graphql
+type Product @scope(to: ["public", "internal"]) {
+  id: ID!
+  name: String
+  price: BigDecimal
+}
+
+extend type Product @scope(to: ["internal"]) {
+  costBasis: BigDecimal
+  margin: Float
+  supplierInfo: String
+}
+```
+
+## Validation Rules
+
+Viaduct performs static analysis at build time to ensure valid scope usage:
+
+### 1. Detecting Inaccessible Fields
+
+The validator detects when fields reference types that aren't accessible in the same scopes:
+
+```graphql
+# ❌ Invalid: User is not visible in scope3
+type User @scope(to: ["scope1", "scope2"]) {
+  id: ID!
+  firstName: String
+}
+
+type Listing @scope(to: ["scope3"]) {
+  user: User  # This field would never be accessible
+}
+```
+
+Fix this by either:
+- Adding `scope1` or `scope2` to the `Listing` type's scopes, OR
+- Adding `scope3` to the `User` type's scopes
+
+### 2. Auto-Pruning Empty Types
+
+When all fields of a type are out of scope, the type itself is pruned from the schema:
+
+```graphql
+type StaySpace @scope(to: ["viaduct", "listing-block"]) {
+  spaceId: Long
+  metadata: SpaceMetadata  # Will be pruned in listing-block scope
+}
+
+type SpaceMetadata @scope(to: ["viaduct", "listing-block"]) {
+  bathroom: StayBathroomMetadata
+  bedroom: StayBedroomMetadata
+}
+
+type StayBathroomMetadata @scope(to: ["viaduct"]) {
+  spaceName: String
+}
+
+type StayBedroomMetadata @scope(to: ["viaduct"]) {
+  spaceName: String
+}
+```
+
+In the `listing-block` scope, `SpaceMetadata` becomes empty (both bathroom and bedroom are unavailable), so the entire `metadata` field is pruned from `StaySpace`.
+
+### 3. Validating Type Extension Scopes
+
+Type extension scopes must be a subset of the original type's scopes:
+
+```graphql
+# ❌ Invalid: viaduct:internal-tools not in original type
+type User @scope(to: ["viaduct", "user-block"]) {
+  id: ID!
+  firstName: String
+}
+
+extend type User @scope(to: ["viaduct:internal-tools"]) {
+  aSpecialInternalField: String
+}
+```
+
+Correct version:
+
+```graphql
+# ✅ Valid: Extension scope is subset of original
+type User @scope(to: ["viaduct", "viaduct:internal-tools", "user-block"]) {
+  id: ID!
+  firstName: String
+}
+
+extend type User @scope(to: ["viaduct:internal-tools"]) {
+  aSpecialInternalField: String
+}
+```
+
+## Working with Interfaces and Unions
+
+### Interfaces
+
+```graphql
+interface Node @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+}
+
+type User implements Node @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  name: String
+}
+
+type Listing implements Node @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  title: String
+}
+```
+
+### Unions
+
+Define unions and their members in schema modules with proper dependency relationships:
+
+```graphql
+# In entity module
+type TypeA @scope(to: ["viaduct"]) {
+  fieldA: String
+}
+
+union SearchResult @scope(to: ["viaduct"]) = TypeA
+
+# In data module (depends on entity module)
+type TypeB @scope(to: ["viaduct"]) {
+  fieldB: String
+}
+
+extend union SearchResult = TypeB  # ✅ OK: data depends on entity
+```
+
+<Warning>
+  Make sure you define union members in schema modules that depend on the module where the union is defined. Otherwise, you'll get errors like "Unable to find concrete type for union in the type map."
+</Warning>
+
+## Example: Star Wars Demo
+
+The Star Wars demo application uses two main scopes:
+
+- `default` - Public schema for general availability
+- `extras` - Extended schema with additional metadata
+
+```graphql
+type Species @scope(to: ["default", "extras"]) {
+  id: ID!
+  name: String
+}
+
+extend type Species @scope(to: ["extras"]) {
+  culturalNotes: String
+  specialAbilities: [String]
+}
+```
+
+Scopes are passed via a custom header:
+
+```json
+{
+  "X-StarWars-Scopes": "default,extras"
+}
+```
+
+The controller extracts scopes and selects the appropriate schema:
+
+```kotlin
+val requestedScopes = request.getHeader("X-StarWars-Scopes")
+    ?.split(",")
+    ?.map { it.trim() }
+    ?: listOf("default")
+
+val schemaId = if (requestedScopes.contains("extras")) {
+    "all-scopes"
+} else {
+    "default"
+}
+
+val executionInput = ExecutionInput.Builder()
+    .schemaId(schemaId)
+    .query(query)
+    .build()
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Do: Define Core Scopes" icon="check">
+    Establish a `default` or `public` scope for general availability and use additional scopes for specialized access.
+  </Card>
+  
+  <Card title="Do: Keep Scopes Orthogonal" icon="check">
+    Avoid overlapping responsibilities between scopes to reduce confusion and accidental exposure.
+  </Card>
+  
+  <Card title="Don't: Mix Scope Strategies" icon="xmark">
+    Either use scopes everywhere or nowhere. Partial adoption leads to confusion.
+  </Card>
+  
+  <Card title="Don't: Rely Solely on Scopes" icon="xmark">
+    Scopes control schema visibility. Complement with application-level authorization for data-level controls.
+  </Card>
+</CardGroup>
+
+## Debugging Scope Issues
+
+### Verify Scope Configuration
+
+Check what scopes are active in your request:
+
+```kotlin
+logger.info("Active scopes for request: ${executionInput.schemaId}")
+```
+
+### Test with GraphQL Introspection
+
+Use introspection queries to verify which fields are visible in different scopes:
+
+```graphql
+{
+  __type(name: "User") {
+    fields {
+      name
+    }
+  }
+}
+```
+
+Run this query with different scope configurations to verify visibility.
+
+### Common Error: Empty Type After Filtering
+
+If you get unexpected null values, check if the type has been pruned due to all its fields being out of scope.
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Schema Reference" icon="book" href="/essentials/schema-reference">
+    Learn about the @scope directive and other built-in directives
+  </Card>
+  
+  <Card title="Field Classification" icon="layer-group" href="/advanced/field-classification">
+    Understanding field visibility and classification
+  </Card>
+</CardGroup>

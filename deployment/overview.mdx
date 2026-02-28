@@ -1,0 +1,172 @@
+---
+title: Deployment Overview
+description: Understanding Viaduct deployment models and options
+---
+
+## Overview
+
+Viaduct is a GraphQL server framework that can be deployed in multiple ways depending on your application needs. Unlike frameworks that provide a complete HTTP server, Viaduct is designed to be embedded into your existing web infrastructure, giving you full control over HTTP handling, authentication, routing, and other infrastructure concerns.
+
+## Deployment Models
+
+Viaduct supports two primary deployment approaches:
+
+### 1. Embedded Deployment (Production)
+
+In production environments, you embed Viaduct into your HTTP server of choice. This is the recommended approach for production deployments.
+
+**Key characteristics:**
+- Full control over HTTP server configuration
+- Integration with your existing infrastructure
+- Custom authentication and authorization
+- Production-grade error handling and monitoring
+- Supports any JVM-based HTTP server (Jetty, Ktor, Micronaut, Spring, etc.)
+
+**When to use:**
+- Production deployments
+- When you need custom HTTP middleware
+- When integrating with existing web applications
+- When you need fine-grained control over request/response handling
+
+See [Embedding Viaduct](embedding-viaduct) for implementation details.
+
+### 2. Development Server
+
+For local development, Viaduct provides a built-in development server with auto-reload capabilities and GraphiQL integration.
+
+**Key characteristics:**
+- Zero configuration for simple applications
+- Automatic code reloading on file changes
+- Built-in GraphiQL IDE for testing
+- Fast iteration during development
+
+**When to use:**
+- Local development
+- Rapid prototyping
+- Learning Viaduct
+- Testing schema changes
+
+See [Development Server](development-server) for usage details.
+
+## Hosting Options
+
+### Self-Hosted
+
+Deploy Viaduct on your own infrastructure:
+
+- **Virtual Machines**: Deploy as a standard JVM application on VMs or bare metal
+- **Containers**: Package as Docker containers for Kubernetes, ECS, or other container platforms
+- **Serverless Functions**: Deploy on AWS Lambda, Google Cloud Functions, or Azure Functions (with appropriate cold-start considerations)
+
+### Cloud Platforms
+
+Viaduct works with all major cloud providers:
+
+- **AWS**: EC2, ECS, EKS, Lambda
+- **Google Cloud**: GCE, GKE, Cloud Run, Cloud Functions
+- **Azure**: VMs, AKS, Container Instances, Functions
+- **Platform-as-a-Service**: Heroku, Railway, Render, Fly.io
+
+## Architecture Patterns
+
+### Single Instance
+
+Simplest deployment with one Viaduct instance handling all requests.
+
+```
+Client → HTTP Server (with Viaduct) → Data Sources
+```
+
+**Pros:**
+- Simple to deploy and manage
+- Low overhead
+- Easy debugging
+
+**Cons:**
+- Single point of failure
+- Limited scalability
+- No load distribution
+
+**Best for:**
+- Development environments
+- Low-traffic applications
+- Internal tools
+
+### Load Balanced
+
+Multiple Viaduct instances behind a load balancer for high availability.
+
+```
+Client → Load Balancer → Multiple HTTP Servers (with Viaduct) → Data Sources
+```
+
+**Pros:**
+- High availability
+- Horizontal scalability
+- Zero-downtime deployments
+- Traffic distribution
+
+**Cons:**
+- More complex infrastructure
+- Requires session management considerations
+
+**Best for:**
+- Production environments
+- High-traffic applications
+- Applications requiring high availability
+
+### Microservices
+
+Viaduct as a GraphQL gateway orchestrating multiple backend services.
+
+```
+Client → Viaduct GraphQL Gateway → Multiple Microservices
+```
+
+**Pros:**
+- Unified API surface
+- Backend flexibility
+- Service isolation
+- Independent scaling
+
+**Cons:**
+- Increased complexity
+- Network latency considerations
+- Distributed tracing requirements
+
+**Best for:**
+- Large-scale applications
+- Organizations with multiple teams
+- Systems with diverse backend technologies
+
+## Deployment Checklist
+
+Before deploying Viaduct to production, ensure you have:
+
+- [ ] Chosen and configured your HTTP server
+- [ ] Implemented authentication and authorization
+- [ ] Set up error reporting and monitoring
+- [ ] Configured logging with appropriate levels
+- [ ] Implemented rate limiting if needed
+- [ ] Configured connection pooling for data sources
+- [ ] Set up health check endpoints
+- [ ] Configured CORS policies if serving browser clients
+- [ ] Implemented proper error handling
+- [ ] Set up performance monitoring and alerting
+- [ ] Tested with production-like load
+- [ ] Documented deployment procedures
+- [ ] Set up backup and disaster recovery
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embedding Viaduct" icon="code" href="embedding-viaduct">
+    Learn how to integrate Viaduct into your HTTP server
+  </Card>
+  <Card title="Development Server" icon="rocket" href="development-server">
+    Use the built-in dev server with auto-reload
+  </Card>
+  <Card title="Production Deployment" icon="server" href="production">
+    Production considerations and best practices
+  </Card>
+</CardGroup>

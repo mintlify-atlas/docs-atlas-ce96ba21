@@ -1,0 +1,317 @@
+---
+title: 'Ktor Starter Tutorial'
+description: 'Build a GraphQL HTTP server using Viaduct with Ktor framework'
+icon: 'globe'
+---
+
+## Overview
+
+The Ktor Starter demonstrates how to integrate Viaduct with Ktor, a modern Kotlin-native asynchronous web framework. This tutorial is ideal for developers who want to leverage Ktor's coroutine-first design with Viaduct's GraphQL capabilities.
+
+## What You'll Learn
+
+- Integrating Viaduct with Ktor server
+- Setting up GraphQL and GraphiQL routes
+- Handling GraphQL requests using Ktor's routing DSL
+- Working with Ktor's asynchronous request/response model
+- Configuring Viaduct with Ktor plugins
+
+## Prerequisites
+
+- Java JDK 21 installed
+- `JAVA_HOME` environment variable set correctly or `java` in your PATH
+- Basic familiarity with Kotlin coroutines
+
+## Project Structure
+
+```
+ktor-starter/
+├── src/main/kotlin/com/example/viadapp/
+│   ├── ViaductApplication.kt       # Application entry point
+│   ├── Plugins.kt                  # Ktor plugin configuration
+│   ├── Routing.kt                  # GraphQL & GraphiQL routes
+│   └── injector/
+│       └── ViaductConfiguration.kt # Viaduct setup
+├── resolvers/                       # GraphQL resolver module
+│   └── src/main/
+│       ├── kotlin/.../resolvers/
+│       │   ├── HelloWorldResolver.kt
+│       │   └── HelloWorldTenantModule.kt
+│       └── viaduct/schema/
+│           └── schema.graphqls
+└── src/main/resources/
+    └── application.conf             # Ktor configuration
+```
+
+<Steps>
+
+### Configure the Application Entry Point
+
+The main application in `ViaductApplication.kt:10` sets up Ktor:
+
+```kotlin
+package com.example.viadapp
+
+import io.ktor.server.application.Application
+
+const val SCHEMA_ID: String = "publicSchema"
+
+fun main(argv: Array<String>) {
+    io.ktor.server.jetty.EngineMain.main(argv)
+}
+
+fun Application.module() {
+    configurePlugins()
+    configureRouting()
+}
+```
+
+**Key Points:**
+- Uses Ktor's `EngineMain` for server startup
+- The `Application.module()` extension function configures the app
+- Plugins and routing are configured separately for modularity
+
+### Set Up GraphQL Routing
+
+The routing configuration in `Routing.kt:20` handles GraphQL requests:
+
+```kotlin
+fun Application.configureRouting() {
+    val viaduct = ViaductConfiguration.viaductService
+
+    routing {
+        // GraphiQL UI endpoint
+        get("/graphiql") {
+            val resource = this::class.java.classLoader.getResource("graphiql/index.html")
+            if (resource != null) {
+                call.respondText(resource.readText(), ContentType.Text.Html)
+            } else {
+                call.respond(HttpStatusCode.NotFound, "GraphiQL not found")
+            }
+        }
+
+        // GraphQL endpoint
+        route("/graphql") {
+            post {
+                val request = call.receive<Map<String, Any?>>()
+
+                // Validate query parameter
+                val query = request["query"] as? String
+                if (query == null) {
+                    call.respond(
+                        HttpStatusCode.BadRequest,
+                        mapOf("errors" to listOf(mapOf("message" to "Query parameter is required")))
+                    )
+                    return@post
+                }
+
+                // Create execution input
+                val executionInput = ExecutionInput.create(
+                    operationText = query,
+                    variables = (request["variables"] as? Map<String, Any>) ?: emptyMap(),
+                )
+
+                // Execute query asynchronously
+                val result: ExecutionResult = viaduct.executeAsync(executionInput).await()
+
+                // Return response
+                val statusCode = when {
+                    result.errors.isNotEmpty() -> HttpStatusCode.BadRequest
+                    else -> HttpStatusCode.OK
+                }
+                call.respond(statusCode, result.toSpecification())
+            }
+        }
+    }
+}
+```
+
+**Key Features:**
+- Uses Ktor's routing DSL for clean endpoint definitions
+- `call.receive<Map<String, Any?>>()` automatically parses JSON
+- `viaduct.executeAsync().await()` integrates with Kotlin coroutines
+- Proper error handling with HTTP status codes
+
+### Configure Viaduct
+
+The Viaduct instance is created in `ViaductConfiguration.kt`:
+
+```kotlin
+object ViaductConfiguration {
+    val viaductService: Viaduct by lazy {
+        BasicViaductFactory.create(
+            tenantRegistrationInfo = TenantRegistrationInfo(
+                tenantPackagePrefix = "com.example.viadapp"
+            )
+        )
+    }
+}
+```
+
+This lazy initialization ensures Viaduct is created only once when first accessed.
+
+### Define Schema and Resolvers
+
+The GraphQL schema in `resolvers/src/main/viaduct/schema/schema.graphqls`:
+
+```graphql
+extend type Query {
+  greeting: String @resolver
+  author: String @resolver
+}
+```
+
+Resolver implementation in `resolvers/src/main/kotlin/.../HelloWorldResolver.kt`:
+
+```kotlin
+@Resolver
+class GreetingResolver : QueryResolvers.Greeting() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Hello, World!"
+    }
+}
+
+@Resolver
+class AuthorResolver : QueryResolvers.Author() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Brian Kernighan"
+    }
+}
+```
+
+### Start the Server
+
+Run the application:
+
+```bash
+./gradlew run
+```
+
+The server will start on `http://localhost:8080`.
+
+### Test with curl
+
+Send a GraphQL query:
+
+```bash
+curl 'http://localhost:8080/graphql' \
+  -H 'content-type: application/json' \
+  --data-raw '{"query":"{ greeting }"}'
+```
+
+**Response:**
+```json
+{"data":{"greeting":"Hello, World!"}}
+```
+
+### Query Multiple Fields
+
+```bash
+curl 'http://localhost:8080/graphql' \
+  -H 'content-type: application/json' \
+  --data-raw '{"query":"query HelloWorld { greeting author }"}'
+```
+
+**Response:**
+```json
+{
+  "data": {
+    "greeting": "Hello, World!",
+    "author": "Brian Kernighan"
+  }
+}
+```
+
+### Use GraphiQL
+
+Open your browser and navigate to:
+
+```
+http://localhost:8080/graphiql?path=/graphql
+```
+
+Run this query in the GraphiQL interface:
+
+```graphql
+query HelloWorld {
+  greeting
+  author
+}
+```
+
+**Expected Response:**
+```json
+{
+  "data": {
+    "greeting": "Hello, World!",
+    "author": "Brian Kernighan"
+  }
+}
+```
+
+</Steps>
+
+## How It Works
+
+### Ktor's Coroutine Integration
+
+Ktor is built on Kotlin coroutines, making it a natural fit for Viaduct's suspend functions:
+
+```kotlin
+// Ktor route handler is a suspend function
+post {
+    val result = viaduct.executeAsync(executionInput).await()
+    call.respond(statusCode, result.toSpecification())
+}
+```
+
+- `viaduct.executeAsync()` returns a `CompletableFuture`
+- `.await()` (from `kotlinx.coroutines.future`) converts it to a suspending call
+- No blocking threads—fully asynchronous execution
+
+### Request Processing Flow
+
+1. **HTTP POST to `/graphql`**: Ktor receives the request
+2. **JSON Deserialization**: `call.receive<Map<String, Any?>>()` parses the body
+3. **Validation**: Check that `query` field exists
+4. **ExecutionInput Creation**: Build Viaduct's execution context
+5. **Async Execution**: `viaduct.executeAsync(executionInput).await()`
+6. **Response**: Convert to JSON and send with appropriate status code
+
+### Error Handling
+
+The routing logic handles errors gracefully:
+
+- **Missing query**: Returns 400 Bad Request with error message
+- **GraphQL errors**: Returns 400 with errors in response body
+- **Successful execution**: Returns 200 OK
+
+### Configuration Files
+
+Ktor uses `application.conf` for server configuration:
+
+```hocon
+ktor {
+    deployment {
+        port = 8080
+    }
+    application {
+        modules = [ com.example.viadapp.ViaductApplicationKt.module ]
+    }
+}
+```
+
+## Why Use Ktor with Viaduct?
+
+1. **Coroutine-First**: Both Ktor and Viaduct embrace Kotlin coroutines
+2. **Lightweight**: Minimal overhead compared to traditional servlet containers
+3. **Idiomatic Kotlin**: Clean DSL for routing and configuration
+4. **Async by Default**: Non-blocking I/O for high-performance applications
+5. **Modern Stack**: Built for cloud-native and microservice architectures
+
+## Next Steps
+
+- Explore the [Micronaut Starter Tutorial](/tutorials/micronaut-starter) for dependency injection
+- Learn about [Custom Context](/advanced/custom-context) for request metadata
+- Study the [Star Wars Tutorial](/tutorials/starwars) for complex schema design
+- Read the [Getting Started Guide](/quickstart) for foundational concepts

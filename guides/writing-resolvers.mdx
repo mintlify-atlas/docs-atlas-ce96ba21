@@ -1,0 +1,663 @@
+---
+title: Writing Resolvers
+description: Field resolvers, node resolvers, and responsibility sets in Viaduct
+---
+
+Resolvers are the heart of your Viaduct application. They implement the business logic that fetches and transforms data for your GraphQL fields.
+
+## Types of Resolvers
+
+Viaduct provides two types of resolvers:
+
+<CardGroup cols={2}>
+  <Card title="Node Resolvers" icon="database">
+    Fetch objects by their global ID. Every type implementing `Node` has a node resolver.
+  </Card>
+  <Card title="Field Resolvers" icon="function">
+    Compute field values. Used for fields marked with `@resolver` directive.
+  </Card>
+</CardGroup>
+
+## Node Resolvers
+
+Node resolvers fetch entities by their GlobalID.
+
+### Schema Definition
+
+```graphql
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  email: String
+  displayName: String @resolver
+}
+```
+
+### Generated Base Class
+
+Viaduct generates an abstract base class for each Node type:
+
+```kotlin
+object NodeResolvers {
+  abstract class User {
+    open suspend fun resolve(ctx: Context): viaduct.api.grts.User =
+      throw NotImplementedError()
+
+    open suspend fun batchResolve(contexts: List<Context>): List<FieldValue<viaduct.api.grts.User>> =
+      throw NotImplementedError()
+
+    class Context: NodeExecutionContext<viaduct.api.grts.User>
+  }
+}
+```
+
+### Simple Implementation
+
+```kotlin
+import com.example.myapp.resolverbases.NodeResolvers
+import jakarta.inject.Inject
+import viaduct.api.Resolver
+import viaduct.api.grts.User
+
+@Resolver
+class UserNodeResolver @Inject constructor(
+    private val userService: UserServiceClient
+) : NodeResolvers.User() {
+    override suspend fun resolve(ctx: Context): User {
+        // Fetch data for a single user ID
+        val userData = userService.getUser(ctx.id.internalID)
+        
+        return User.Builder(ctx)
+            .firstName(userData.firstName)
+            .lastName(userData.lastName)
+            .email(userData.email)
+            .build()
+    }
+}
+```
+
+<Note>
+  Node resolvers should **not** populate fields that have their own `@resolver` directive. In this example, we don't set `displayName` because it has its own field resolver.
+</Note>
+
+### Batch Node Resolver
+
+Batch resolvers solve the N+1 problem by fetching multiple entities at once:
+
+```kotlin
+@Resolver
+class UserNodeResolver @Inject constructor(
+    private val userService: UserServiceClient
+) : NodeResolvers.User() {
+    override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<User>> {
+        // Extract all IDs
+        val userIds = contexts.map { it.id.internalID }
+        
+        // Single batch call to service
+        val users = userService.batchGetUsers(userIds)
+        
+        // Map results back to contexts
+        return contexts.map { ctx ->
+            val userId = ctx.id.internalID
+            val userData = users[userId]
+            
+            if (userData != null) {
+                FieldValue.ofValue(
+                    User.Builder(ctx)
+                        .firstName(userData.firstName)
+                        .lastName(userData.lastName)
+                        .email(userData.email)
+                        .build()
+                )
+            } else {
+                FieldValue.ofError(
+                    IllegalArgumentException("User not found: $userId")
+                )
+            }
+        }
+    }
+}
+```
+
+<Tip>
+  **Always prefer batch resolvers** when your backend supports batch fetching. This dramatically improves performance for queries that return lists.
+</Tip>
+
+### Node Execution Context
+
+The `Context` object provides:
+
+<ParamField path="id" type="GlobalID<R>">
+  The GlobalID of the node to resolve
+</ParamField>
+
+<ParamField path="selections()" type="SelectionSet<R>">
+  The fields requested in the query (for selective resolvers)
+</ParamField>
+
+You can also:
+- Execute subqueries with `ctx.query()`
+- Create node references with `ctx.nodeFor()`
+- Create GlobalIDs with `ctx.globalIDFor()`
+
+## Field Resolvers
+
+Field resolvers compute values for fields marked with `@resolver`.
+
+### Schema Definition
+
+```graphql
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  displayName: String @resolver
+  profileImage: Image @resolver
+  posts(first: Int, after: String): PostConnection! @resolver
+}
+```
+
+### Generated Base Class
+
+```kotlin
+object UserResolvers {
+  abstract class DisplayName {
+    open suspend fun resolve(ctx: Context): String? =
+      throw NotImplementedError()
+
+    open suspend fun batchResolve(contexts: List<Context>): List<FieldValue<String?>> =
+      throw NotImplementedError()
+
+    class Context: FieldExecutionContext<User, Query, NoArguments, NotComposite>
+  }
+}
+```
+
+### Simple Field Resolver
+
+```kotlin
+import com.example.myapp.resolverbases.UserResolvers
+import viaduct.api.Resolver
+
+@Resolver("firstName lastName")
+class UserDisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        val firstName = ctx.objectValue.getFirstName()
+        val lastName = ctx.objectValue.getLastName()
+        
+        return when {
+            firstName == null && lastName == null -> null
+            firstName == null -> lastName
+            lastName == null -> firstName
+            else -> "$firstName $lastName"
+        }
+    }
+}
+```
+
+<Note>
+  The `@Resolver("firstName lastName")` annotation declares the **required selection set** - the fields this resolver needs to access from the parent object.
+</Note>
+
+### Field Resolver with Arguments
+
+```graphql
+type User {
+  posts(
+    first: Int = 10
+    after: String
+    status: PostStatus
+  ): PostConnection! @resolver
+}
+```
+
+```kotlin
+@Resolver
+class UserPostsResolver @Inject constructor(
+    private val postService: PostServiceClient
+) : UserResolvers.Posts() {
+    override suspend fun resolve(ctx: Context): PostConnection {
+        val userId = ctx.objectValue.getId().internalID
+        val (offset, limit) = ctx.arguments.toOffsetLimit()
+        
+        val posts = postService.getUserPosts(
+            userId = userId,
+            offset = offset,
+            limit = limit + 1,
+            status = ctx.arguments.status
+        )
+        
+        return PostConnection.Builder(ctx)
+            .fromSlice(
+                items = posts,
+                hasNextPage = posts.size > limit
+            ) { post ->
+                ctx.nodeFor(post.id)
+            }
+            .build()
+    }
+}
+```
+
+### Field Execution Context
+
+The `Context` object provides:
+
+<ParamField path="objectValue" type="O">
+  The parent object containing this field. Only fields from the required selection set are accessible.
+</ParamField>
+
+<ParamField path="queryValue" type="Q">
+  The root Query object. Only fields from the query selection set are accessible.
+</ParamField>
+
+<ParamField path="arguments" type="A">
+  Type-safe access to field arguments
+</ParamField>
+
+<ParamField path="selections()" type="SelectionSet<R>">
+  The fields requested for this field's return type
+</ParamField>
+
+## Required Selection Sets
+
+Resolvers declare their data dependencies using GraphQL fragments:
+
+### Shorthand Syntax
+
+Just list the fields you need:
+
+```kotlin
+@Resolver("firstName lastName")
+class UserDisplayNameResolver : UserResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        val firstName = ctx.objectValue.getFirstName()
+        val lastName = ctx.objectValue.getLastName()
+        return "$firstName $lastName"
+    }
+}
+```
+
+### Full Fragment Syntax
+
+Use standard GraphQL fragment syntax for complex selections:
+
+```kotlin
+@Resolver(
+    """
+    fragment _ on User {
+        firstName
+        lastName
+        profileImage {
+            url
+            caption
+        }
+    }
+    """
+)
+class UserSummaryResolver : UserResolvers.Summary() {
+    override suspend fun resolve(ctx: Context): String {
+        val name = ctx.objectValue.getFirstName()
+        val imageUrl = ctx.objectValue.getProfileImage().getUrl()
+        return "$name - $imageUrl"
+    }
+}
+```
+
+### Multiple Fragments
+
+Reuse fragment definitions:
+
+```kotlin
+@Resolver(
+    """
+    fragment Main on User {
+        firstName
+        lastName
+        ...UserImage
+    }
+    fragment UserImage on User {
+        profileImage {
+            url
+            thumbnailUrl
+        }
+    }
+    """
+)
+```
+
+<Warning>
+  If you access a field not in your required selection set, you'll get an `UnsetFieldException` at runtime.
+</Warning>
+
+### Query Value Fragment
+
+Access root Query fields:
+
+```kotlin
+@Resolver(
+    queryValueFragment = """
+    fragment _ on Query {
+        currentUser {
+            id
+            role
+        }
+    }
+    """
+)
+class PermissionCheckResolver : SomeResolvers.Field() {
+    override suspend fun resolve(ctx: Context): Boolean {
+        val currentUser = ctx.queryValue.getCurrentUser()
+        val role = currentUser.getRole()
+        return role == UserRole.ADMIN
+    }
+}
+```
+
+## Responsibility Sets
+
+**Responsibility sets** define which fields each resolver is responsible for.
+
+### Node Resolver Responsibility
+
+A node resolver is responsible for:
+- All fields **without** the `@resolver` directive
+- Including nested fields (unless they have their own resolver)
+- But **not** the `id` field (it's provided as input)
+
+```graphql
+type User implements Node {
+  id: ID!                        # Not included (input)
+  firstName: String              # Responsibility of node resolver
+  lastName: String               # Responsibility of node resolver
+  email: String                  # Responsibility of node resolver
+  displayName: String @resolver  # NOT in node resolver's responsibility
+}
+```
+
+### Field Resolver Responsibility
+
+A field resolver is responsible for:
+- **Scalar/Enum fields**: Just that single field
+- **Object fields**: The field and all nested fields without their own resolver
+
+```graphql
+type User {
+  profile: UserProfile @resolver  # Field resolver's responsibility
+}
+
+type UserProfile {
+  bio: String              # Field resolver's responsibility
+  website: String          # Field resolver's responsibility
+  avatar: Image @resolver  # NOT in field resolver's responsibility
+}
+```
+
+## Building GRTs
+
+Use the builder pattern to construct response objects:
+
+```kotlin
+// Simple object
+val user = User.Builder(ctx)
+    .firstName("Alice")
+    .lastName("Smith")
+    .email("alice@example.com")
+    .build()
+
+// With node reference
+val post = Post.Builder(ctx)
+    .title("My Post")
+    .author(ctx.nodeFor(authorId))  // Creates reference to User node
+    .build()
+
+// With nested object
+val user = User.Builder(ctx)
+    .name("Alice")
+    .profile(
+        UserProfile.Builder(ctx)
+            .bio("Software engineer")
+            .website("https://example.com")
+            .build()
+    )
+    .build()
+```
+
+<Tip>
+  **Use `ctx.nodeFor()`** to create references to Node objects. This tells Viaduct to call the node resolver when those fields are queried.
+</Tip>
+
+## Error Handling
+
+### In Batch Resolvers
+
+Return errors for individual items:
+
+```kotlin
+override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<User>> {
+    return contexts.map { ctx ->
+        try {
+            val user = userService.getUser(ctx.id.internalID)
+            FieldValue.ofValue(buildUser(ctx, user))
+        } catch (e: UserNotFoundException) {
+            FieldValue.ofError(e)
+        }
+    }
+}
+```
+
+### In Regular Resolvers
+
+Throw exceptions directly:
+
+```kotlin
+override suspend fun resolve(ctx: Context): User {
+    val userId = ctx.arguments.id.internalID
+    val user = userService.getUser(userId)
+        ?: throw IllegalArgumentException("User not found: $userId")
+    
+    return User.Builder(ctx)
+        .name(user.name)
+        .build()
+}
+```
+
+## Dependency Injection
+
+Viaduct works with any DI framework:
+
+### With Micronaut
+
+```kotlin
+import jakarta.inject.Inject
+import jakarta.inject.Singleton
+
+@Singleton
+@Resolver
+class UserNodeResolver @Inject constructor(
+    private val userService: UserService,
+    private val authContext: AuthContext
+) : NodeResolvers.User() {
+    // ...
+}
+```
+
+### With Guice
+
+```kotlin
+import javax.inject.Inject
+
+@Resolver
+class UserNodeResolver @Inject constructor(
+    private val userService: UserService
+) : NodeResolvers.User() {
+    // ...
+}
+```
+
+## Real-World Examples
+
+<CodeGroup>
+```kotlin Node Resolver
+@Resolver
+class CharacterNodeResolver @Inject constructor(
+    private val characterRepository: CharacterRepository
+) : NodeResolvers.Character() {
+    override suspend fun batchResolve(
+        contexts: List<Context>
+    ): List<FieldValue<Character>> {
+        val characterIds = contexts.map { it.id.internalID }
+        val characters = characterRepository.findByIds(characterIds)
+        
+        return contexts.map { ctx ->
+            val characterId = ctx.id.internalID
+            val character = characters.find { it.id == characterId }
+            
+            if (character != null) {
+                FieldValue.ofValue(
+                    Character.Builder(ctx)
+                        .name(character.name)
+                        .birthYear(character.birthYear)
+                        .height(character.height)
+                        .mass(character.mass)
+                        .build()
+                )
+            } else {
+                FieldValue.ofError(
+                    IllegalArgumentException("Character not found: $characterId")
+                )
+            }
+        }
+    }
+}
+```
+
+```kotlin Field Resolver (Derived)
+@Resolver("name")
+class CharacterDisplayNameResolver : CharacterResolvers.DisplayName() {
+    override suspend fun resolve(ctx: Context): String? {
+        return ctx.objectValue.getName()
+    }
+}
+```
+
+```kotlin Field Resolver (Complex)
+@Resolver("name birthYear eyeColor hairColor")
+class CharacterAppearanceResolver : CharacterResolvers.AppearanceDescription() {
+    override suspend fun resolve(ctx: Context): String {
+        val name = ctx.objectValue.getName() ?: "Unknown"
+        val birthYear = ctx.objectValue.getBirthYear() ?: "unknown"
+        val eyeColor = ctx.objectValue.getEyeColor() ?: "unknown"
+        val hairColor = ctx.objectValue.getHairColor() ?: "unknown"
+        
+        return "$name (born $birthYear) has $eyeColor eyes and $hairColor hair"
+    }
+}
+```
+
+```kotlin Field Resolver (Relationship)
+@Resolver
+class CharacterHomeworldResolver @Inject constructor(
+    private val planetRepository: PlanetRepository
+) : CharacterResolvers.Homeworld() {
+    override suspend fun resolve(ctx: Context): Planet? {
+        // Get homeworld ID from backing data
+        val character = ctx.objectValue
+        val homeworldId = character.getHomeworldId() ?: return null
+        
+        // Return node reference - will call Planet node resolver
+        return ctx.nodeFor(homeworldId)
+    }
+}
+```
+
+```kotlin Query Resolver
+@Resolver
+class AllCharactersResolver @Inject constructor(
+    private val characterRepository: CharacterRepository
+) : QueryResolvers.AllCharacters() {
+    override suspend fun resolve(ctx: Context): List<Character> {
+        val limit = ctx.arguments.limit ?: 20
+        val characters = characterRepository.findAll(limit)
+        
+        return characters.map { character ->
+            ctx.nodeFor(character.id)
+        }
+    }
+}
+```
+</CodeGroup>
+
+## Best Practices
+
+<Steps>
+  <Step title="Declare your dependencies">
+    Always specify required selection sets in `@Resolver` annotation:
+    
+    ```kotlin
+    @Resolver("firstName lastName")
+    class UserDisplayNameResolver : UserResolvers.DisplayName()
+    ```
+  </Step>
+  
+  <Step title="Use batch resolvers">
+    Implement `batchResolve` for node resolvers and field resolvers that fetch external data:
+    
+    ```kotlin
+    override suspend fun batchResolve(contexts: List<Context>): List<FieldValue<User>>
+    ```
+  </Step>
+  
+  <Step title="Return only your responsibility">
+    Don't set fields that have their own resolvers:
+    
+    ```kotlin
+    // Good - only sets fields in responsibility set
+    User.Builder(ctx)
+        .firstName(data.firstName)
+        .lastName(data.lastName)
+        .build()
+    
+    // Bad - displayName has its own resolver
+    User.Builder(ctx)
+        .firstName(data.firstName)
+        .displayName("...")  // Don't do this!
+        .build()
+    ```
+  </Step>
+  
+  <Step title="Use node references for relationships">
+    Use `ctx.nodeFor()` instead of inline building:
+    
+    ```kotlin
+    // Good - creates node reference
+    Post.Builder(ctx)
+        .author(ctx.nodeFor(authorId))
+        .build()
+    
+    // Bad - duplicates node resolver logic
+    Post.Builder(ctx)
+        .author(
+            User.Builder(ctx)
+                .firstName(...)
+                .build()
+        )
+        .build()
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Mutations" icon="pen" href="/guides/mutations">
+    Learn how to implement mutations
+  </Card>
+  <Card title="Pagination" icon="list" href="/guides/pagination">
+    Implement cursor-based pagination
+  </Card>
+  <Card title="Testing" icon="vial" href="/guides/testing">
+    Write tests for your resolvers
+  </Card>
+</CardGroup>

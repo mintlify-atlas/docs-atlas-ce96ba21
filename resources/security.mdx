@@ -1,0 +1,75 @@
+---
+title: Security Policy
+description: How to report security vulnerabilities
+---
+
+## Reporting Security Issues
+
+The Viaduct team and community take security bugs in Viaduct seriously. We appreciate your efforts to responsibly disclose your findings, and will make every effort to acknowledge your contributions.
+
+Any security issues should be submitted directly to the [Airbnb bug bounty program](https://hackerone.com/airbnb).
+
+## Determining if You Have a Security Issue
+
+In order to determine whether you are dealing with a security issue, ask yourself these two questions:
+
+1. **Can I access something that's not mine, or something I shouldn't have access to?**
+2. **Can I disable something for other people?**
+
+If the answer to either of those two questions are "yes", then you're probably dealing with a security issue.
+
+<Warning>
+Note that even if you answer "no" to both questions, you may still be dealing with a security issue. If you're unsure, please direct questions to our bug bounty program.
+</Warning>
+
+## Security Disclosure Process
+
+1. Submit your findings to the [Airbnb bug bounty program](https://hackerone.com/airbnb)
+2. The security team will acknowledge receipt of your report
+3. The team will investigate and validate the issue
+4. Once confirmed, the team will work on a fix and coordinate disclosure timing with you
+5. You will be credited for your responsible disclosure (unless you prefer to remain anonymous)
+
+## What Happens Next?
+
+After you submit a security issue:
+
+- The Viaduct security team will acknowledge your report and begin investigating
+- We will keep you informed about the progress of the fix
+- We will work with you to understand the scope and severity of the issue
+- Once a fix is ready, we will coordinate the disclosure timeline with you
+- We will publicly acknowledge your responsible disclosure in our release notes (if you wish)
+
+## Scope
+
+This security policy applies to:
+
+- The Viaduct framework and its core components
+- Viaduct Gradle plugins
+- Viaduct demo applications
+- Any code in the [airbnb/viaduct](https://github.com/airbnb/viaduct) repository
+
+## Out of Scope
+
+The following are generally considered out of scope:
+
+- Issues in third-party dependencies (please report these to the respective projects)
+- Theoretical vulnerabilities without proof of exploitability
+- Social engineering attacks
+- Physical attacks against Airbnb infrastructure
+
+## Security Best Practices
+
+When using Viaduct in production, we recommend:
+
+- Keep Viaduct and its dependencies up to date
+- Follow the security guidelines in our documentation
+- Implement proper authentication and authorization for your GraphQL endpoints
+- Use HTTPS for all production traffic
+- Implement rate limiting and query complexity analysis
+- Monitor your application for suspicious activity
+- Review and audit resolver implementations for potential security issues
+
+## Questions?
+
+If you have questions about this security policy or the disclosure process, please start a [discussion](https://github.com/airbnb/viaduct/discussions) on GitHub (for non-sensitive questions) or contact the security team through the bug bounty program.

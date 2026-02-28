@@ -1,0 +1,346 @@
+---
+title: Tenant API
+description: Core classes and interfaces for implementing Viaduct resolvers and modules
+---
+
+The Tenant API (`viaduct.api`) provides the foundational interfaces and utilities for application developers to implement GraphQL resolvers, define modules, and interact with the Viaduct execution context.
+
+## Overview
+
+The Tenant API is designed to be used by **application developers** (tenant developers) who write business logic on top of Viaduct. It provides:
+
+- Base interfaces for resolvers (`ResolverBase`, `NodeResolverBase`)
+- Execution contexts for accessing request data
+- Field value handling
+- Module definition interfaces
+- Utilities for working with connections and pagination
+
+## Core Interfaces
+
+### ResolverBase
+
+Base interface for all field resolver classes.
+
+```kotlin
+interface ResolverBase<T>
+```
+
+<ParamField path="T" type="type parameter">
+  The return type of the resolve function
+</ParamField>
+
+**Package:** `viaduct.api`
+
+**Stability:** Stable
+
+**Usage:**
+
+When you mark a field with `@resolver` in your GraphQL schema, Viaduct generates an abstract resolver class that extends `ResolverBase`. You implement the generated abstract class to provide custom resolution logic.
+
+```kotlin
+class UserResolver : UserQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): User {
+        // Your resolution logic
+    }
+}
+```
+
+### NodeResolverBase
+
+Base interface for node resolver classes that resolve entities by Global ID.
+
+```kotlin
+interface NodeResolverBase<T : NodeObject>
+```
+
+<ParamField path="T" type="type parameter">
+  The return type implementing `NodeObject` (entities with global IDs)
+</ParamField>
+
+**Package:** `viaduct.api`
+
+**Stability:** Stable
+
+**Usage:**
+
+When your GraphQL type implements the `Node` interface, Viaduct generates a node resolver base class. Implement it to resolve entities by their Global ID:
+
+```kotlin
+class UserNodeResolver : UserNodeResolverBase() {
+    override suspend fun resolve(ctx: NodeExecutionContext<User>): User? {
+        val userId = ctx.id.internalID
+        return fetchUserById(userId)
+    }
+}
+```
+
+### SelectiveResolver
+
+Marker interface for node resolvers that vary their response based on the requested selection set.
+
+```kotlin
+interface SelectiveResolver
+```
+
+**Package:** `viaduct.api`
+
+**Stability:** Stable
+
+**Effects of implementing this interface:**
+- Enables access to `ctx.selections()` within resolver methods
+- Changes caching behavior to match by ID + selection set (instead of ID-only)
+
+**When to use:**
+- Use when the resolver needs to optimize by fetching only requested fields
+- Don't use if the resolver always returns the same data for a given ID
+
+**Example:**
+
+```kotlin
+class OptimizedUserResolver : UserNodeResolverBase(), SelectiveResolver {
+    override suspend fun resolve(ctx: SelectiveNodeExecutionContext<User>): User? {
+        val selections = ctx.selections()
+        // Fetch only the fields that were selected
+        return fetchUserWithSelections(ctx.id.internalID, selections)
+    }
+}
+```
+
+### TenantModule
+
+Interface that all Viaduct modules must implement.
+
+```kotlin
+interface TenantModule {
+    val metadata: Map<String, String>
+    val packageName: String
+}
+```
+
+<ResponseField name="metadata" type="Map<String, String>">
+  Metadata to be associated with this module
+</ResponseField>
+
+<ResponseField name="packageName" type="String">
+  The package name for the module (defaults to the Java package name)
+</ResponseField>
+
+**Package:** `viaduct.api`
+
+**Stability:** Stable
+
+**Usage:**
+
+Viaduct code generation creates a module class for each module. You typically don't implement this directly.
+
+```kotlin
+object FilmographyModule : TenantModule {
+    override val metadata = mapOf(
+        "version" to "1.0",
+        "description" to "Star Wars filmography data"
+    )
+}
+```
+
+## Execution Contexts
+
+Execution contexts provide access to request data, arguments, selections, and utilities within resolvers.
+
+### ExecutionContext
+
+Generic base context for all resolvers and variable providers.
+
+```kotlin
+interface ExecutionContext {
+    fun <T : NodeObject> globalIDFor(type: Type<T>, internalID: String): GlobalID<T>
+    val requestContext: Any?
+}
+```
+
+<ResponseField name="globalIDFor" type="function">
+  Creates a Global ID for a given type and internal ID
+  
+  **Parameters:**
+  - `type: Type<T>` - The reflection type (e.g., `User.Reflection`)
+  - `internalID: String` - Your internal identifier
+  
+  **Returns:** `GlobalID<T>` - Type-safe Global ID
+  
+  **Example:**
+  ```kotlin
+  val userId = ctx.globalIDFor(User.Reflection, "123")
+  ```
+</ResponseField>
+
+<ResponseField name="requestContext" type="Any?">
+  Value set as `ExecutionInput.requestContext` by the service engineer. Use this to access deployment-specific request context like authentication, tracing, etc.
+</ResponseField>
+
+### FieldExecutionContext
+
+Execution context provided to field resolvers.
+
+```kotlin
+interface FieldExecutionContext<O : Object, Q : Query, A : Arguments, R : CompositeOutput> : 
+    BaseFieldExecutionContext<Q, A, R>
+```
+
+<ParamField path="O" type="type parameter">
+  The parent object type containing this field
+</ParamField>
+
+<ParamField path="Q" type="type parameter">
+  The query type for data fetching
+</ParamField>
+
+<ParamField path="A" type="type parameter">
+  The arguments type for this field
+</ParamField>
+
+<ParamField path="R" type="type parameter">
+  The return type (composite output)
+</ParamField>
+
+**Key Properties and Methods:**
+
+<ResponseField name="objectValue" type="O">
+  The parent object value with selections from `objectValueFragment` populated. Access is lazy - fields resolve on demand.
+  
+  **Example:**
+  ```kotlin
+  val userName = ctx.objectValue.name
+  ```
+</ResponseField>
+
+<ResponseField name="getObjectValue()" type="suspend () -> O" experimental>
+  Returns a synchronously-accessible version of `objectValue` where all selections have been eagerly resolved. Use when you need all object data available before proceeding.
+</ResponseField>
+
+<ResponseField name="queryValue" type="Q" inherits="from BaseFieldExecutionContext">
+  Access to root Query type selections. Useful for fetching additional data.
+</ResponseField>
+
+<ResponseField name="arguments" type="A" inherits="from BaseFieldExecutionContext">
+  Field arguments provided by the caller
+</ResponseField>
+
+<ResponseField name="selections()" type="SelectionSet<R>" inherits="from BaseFieldExecutionContext">
+  The selection set requested by the caller for the return type
+</ResponseField>
+
+### NodeExecutionContext
+
+Execution context for Node resolvers (non-selective).
+
+```kotlin
+interface NodeExecutionContext<R : NodeObject> : ResolverExecutionContext<Query>
+```
+
+<ResponseField name="id" type="GlobalID<R>">
+  The Global ID of the node being resolved
+  
+  **Example:**
+  ```kotlin
+  val internalId = ctx.id.internalID
+  val user = fetchUserById(internalId)
+  ```
+</ResponseField>
+
+### SelectiveNodeExecutionContext
+
+Extended context for Node resolvers implementing `SelectiveResolver`.
+
+```kotlin
+interface SelectiveNodeExecutionContext<R : NodeObject> : NodeExecutionContext<R>
+```
+
+<ResponseField name="selections()" type="SelectionSet<R>">
+  The selection set requested for this node. Only available when the resolver implements `SelectiveResolver`.
+</ResponseField>
+
+### ConnectionFieldExecutionContext
+
+Specialized execution context for Relay-style connection fields with pagination.
+
+```kotlin
+interface ConnectionFieldExecutionContext<O, Q, A : ConnectionArguments, R : Connection<*, *>> : 
+    FieldExecutionContext<O, Q, A, R>
+```
+
+**Package:** `viaduct.api.context`
+
+**Stability:** Experimental
+
+**Usage:**
+
+Used for fields marked with `@connection` that return paginated results. The arguments type `A` automatically includes pagination parameters like `first`, `after`, `last`, `before`.
+
+### MutationFieldExecutionContext
+
+Execution context for root Mutation type field resolvers.
+
+```kotlin
+interface MutationFieldExecutionContext<Q, M : Mutation, A, R> : 
+    BaseFieldExecutionContext<Q, A, R>
+```
+
+<ResponseField name="mutation()" type="suspend (String, Map<String, Any?>) -> M">
+  Executes selections on the root Mutation type
+  
+  **Parameters:**
+  - `selections: String` - GraphQL selections to execute
+  - `variables: Map<String, Any?>` - Optional variables (defaults to empty)
+  
+  **Example:**
+  ```kotlin
+  val result = ctx.mutation("{ createUser(input: $input) { id name } }")
+  ```
+</ResponseField>
+
+## Field Values
+
+### FieldValue
+
+Represents the result of resolving a GraphQL field, which may be either a value or an error.
+
+```kotlin
+sealed interface FieldValue<out T> {
+    fun get(): T
+    val isError: Boolean
+}
+```
+
+<ResponseField name="get()" type="T">
+  Returns the value on success, or throws an exception for an error value
+</ResponseField>
+
+<ResponseField name="isError" type="Boolean">
+  Whether this represents an error value
+</ResponseField>
+
+**Companion Object Methods:**
+
+<ResponseField name="ofValue(value)" type="<T> (T) -> FieldValue<T>" static>
+  Constructs a FieldValue that resolved successfully
+  
+  **Example:**
+  ```kotlin
+  return FieldValue.ofValue(user)
+  ```
+</ResponseField>
+
+<ResponseField name="ofError(error)" type="(Exception) -> FieldValue<Nothing>" static>
+  Constructs a FieldValue that resolved with an error. Use `FieldError` to customize the GraphQL error response.
+  
+  **Example:**
+  ```kotlin
+  return FieldValue.ofError(FieldError("User not found"))
+  ```
+</ResponseField>
+
+## See Also
+
+- [Service API](service-api) - Entry point for executing GraphQL operations
+- [Engine API](engine-api) - Core GraphQL execution engine
+- [Directives](directives) - GraphQL directives for schema definition
+- [Module Plugin](module-plugin) - Gradle plugin for Viaduct modules

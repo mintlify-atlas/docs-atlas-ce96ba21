@@ -1,0 +1,556 @@
+---
+title: Defining GraphQL Schemas
+description: How to write GraphQL schemas with Viaduct directives
+---
+
+Viaduct uses a **schema-first** approach where you define your GraphQL schema in `.graphqls` files, and the framework generates type-safe Kotlin code for you to implement.
+
+## Schema Files
+
+Schema files must be placed in `src/main/viaduct/schema/` within each module:
+
+```
+modules/users/
+└── src/main/viaduct/schema/
+    ├── User.graphqls
+    └── queries.graphqls
+```
+
+<Note>
+  Use the `.graphqls` extension for schema files. Viaduct will automatically discover and process all schema files in this directory.
+</Note>
+
+## Basic Schema Structure
+
+### Extending Root Types
+
+Always use `extend type` for Query and Mutation (never define them directly):
+
+```graphql title="schema/queries.graphqls"
+extend type Query {
+  user(id: ID! @idOf(type: "User")): User @resolver
+  users(first: Int, after: String): UserConnection! @resolver
+}
+
+extend type Mutation {
+  createUser(input: CreateUserInput!): User @resolver
+  updateUser(id: ID! @idOf(type: "User"), input: UpdateUserInput!): User @resolver
+}
+```
+
+<Warning>
+  Never write `type Query { ... }` or `type Mutation { ... }`. Always use `extend type`.
+</Warning>
+
+### Defining Node Types
+
+Types that implement the `Node` interface are globally identifiable by ID:
+
+```graphql title="schema/User.graphqls"
+type User implements Node {
+  id: ID!
+  name: String!
+  email: String!
+  createdAt: DateTime!
+  
+  # Fields with custom business logic
+  displayName: String @resolver
+  isActive: Boolean @resolver
+  
+  # Relationships to other nodes
+  posts(first: Int, after: String): PostConnection! @resolver
+}
+```
+
+## Viaduct Directives
+
+Viaduct provides four core directives for schema definition:
+
+### @resolver
+
+Marks fields or types that require custom resolution logic:
+
+```graphql
+type Query {
+  # Simple query field
+  currentUser: User @resolver
+  
+  # With arguments
+  user(id: ID! @idOf(type: "User")): User @resolver
+}
+
+type User implements Node {
+  id: ID!
+  firstName: String
+  lastName: String
+  
+  # Derived field - computed from firstName and lastName
+  displayName: String @resolver
+  
+  # Field backed by different data source
+  profileImage: Image @resolver
+}
+```
+
+**When to use @resolver:**
+
+<CardGroup cols={2}>
+  <Card title="Fields with arguments">
+    Any field that accepts arguments should have its own resolver
+  </Card>
+  <Card title="Different data sources">
+    When a field comes from a separate service or database
+  </Card>
+  <Card title="Computed values">
+    Fields derived from other fields with business logic
+  </Card>
+  <Card title="Expensive operations">
+    Fields that should only execute when explicitly requested
+  </Card>
+</CardGroup>
+
+### @idOf
+
+Declares that an ID field references a specific Node type:
+
+```graphql
+type Query {
+  user(id: ID! @idOf(type: "User")): User @resolver
+  users(ids: [ID!]! @idOf(type: "User")): [User!]! @resolver
+}
+
+input CreatePostInput {
+  title: String!
+  authorId: ID! @idOf(type: "User")
+}
+
+type Post implements Node {
+  id: ID!
+  title: String!
+  
+  # Without @idOf, this would be a String
+  authorId: ID! @idOf(type: "User")
+}
+```
+
+<Tip>
+  Using `@idOf` gives you type-safe `GlobalID<User>` in your Kotlin code instead of plain strings. This prevents accidentally mixing up IDs of different types.
+</Tip>
+
+### @backingData
+
+Specifies the backing data class for automatic field resolution:
+
+```graphql
+type User {
+  profile: UserProfile @backingData(class: "com.example.myapp.data.UserProfileData")
+}
+
+type UserProfile {
+  bio: String
+  location: String
+  website: String
+}
+```
+
+<Note>
+  With `@backingData`, Viaduct can automatically resolve nested fields without requiring a custom resolver.
+</Note>
+
+### @scope
+
+Controls visibility of fields and types across schema variants:
+
+```graphql
+type User @scope(to: ["public", "internal"]) {
+  id: ID!
+  name: String!
+  
+  # Only visible in internal schema
+  email: String @scope(to: ["internal"])
+  lastLoginAt: DateTime @scope(to: ["internal"])
+}
+
+# Only exists in admin schema
+type AdminMetrics @scope(to: ["admin"]) {
+  totalUsers: Int!
+  activeUsers: Int!
+}
+```
+
+## Connection Types (Pagination)
+
+Define paginated lists using `@connection` and `@edge`:
+
+```graphql title="schema/connections.graphqls"
+type UserConnection @connection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int  # Optional additional field
+}
+
+type UserEdge @edge {
+  node: User!
+  cursor: String!
+  joinedAt: DateTime  # Optional additional field
+}
+```
+
+**Requirements:**
+
+<Steps>
+  <Step title="Connection type">
+    - Name must end with `Connection`
+    - Must have `edges: [<EdgeType>!]!` field
+    - Must have `pageInfo: PageInfo!` field
+    - Use `@connection` directive
+  </Step>
+  
+  <Step title="Edge type">
+    - Name must end with `Edge`
+    - Must have `node` field (any type except list)
+    - Must have `cursor: String!` field
+    - Use `@edge` directive
+  </Step>
+</Steps>
+
+See [Pagination](/guides/pagination) for implementation details.
+
+## Input Types
+
+Define input types for mutations and complex arguments:
+
+```graphql title="schema/inputs.graphqls"
+input CreateUserInput {
+  name: String!
+  email: String!
+  bio: String
+  
+  # References
+  organizationId: ID @idOf(type: "Organization")
+}
+
+input UpdateUserInput {
+  name: String
+  email: String
+  bio: String
+}
+
+input UserFilterInput {
+  status: UserStatus
+  createdAfter: DateTime
+  createdBefore: DateTime
+}
+```
+
+### OneOf Inputs
+
+Use `@oneOf` for inputs where exactly one field must be provided:
+
+```graphql
+input SearchUserInput @oneOf {
+  byId: ID @idOf(type: "User")
+  byEmail: String
+  byUsername: String
+}
+
+extend type Query {
+  searchUser(search: SearchUserInput!): User @resolver
+}
+```
+
+## Enums
+
+```graphql title="schema/enums.graphqls"
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum UserRole {
+  ADMIN
+  MODERATOR
+  USER
+}
+```
+
+## Interfaces
+
+```graphql title="schema/interfaces.graphqls"
+interface Timestamped {
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type User implements Node & Timestamped {
+  id: ID!
+  name: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+
+type Post implements Node & Timestamped {
+  id: ID!
+  title: String!
+  createdAt: DateTime!
+  updatedAt: DateTime!
+}
+```
+
+## Built-in Scalars
+
+Viaduct provides extended scalars beyond GraphQL defaults:
+
+<ParamField path="Date" type="ISO 8601 date">
+  **Kotlin:** `java.time.LocalDate`
+  
+  **Example:** `"2024-01-15"`
+</ParamField>
+
+<ParamField path="DateTime" type="ISO 8601 date-time">
+  **Kotlin:** `java.time.Instant`
+  
+  **Example:** `"2024-01-15T14:30:00Z"`
+</ParamField>
+
+<ParamField path="Long" type="64-bit integer">
+  **Kotlin:** `Long`
+  
+  **Example:** `9223372036854775807`
+</ParamField>
+
+<ParamField path="BigDecimal" type="Arbitrary precision decimal">
+  **Kotlin:** `java.math.BigDecimal`
+  
+  **Example:** `"123.456789012345"`
+</ParamField>
+
+<ParamField path="BigInteger" type="Arbitrary precision integer">
+  **Kotlin:** `java.math.BigInteger`
+  
+  **Example:** `"12345678901234567890"`
+</ParamField>
+
+<ParamField path="JSON" type="Generic JSON object">
+  **Kotlin:** `com.fasterxml.jackson.databind.JsonNode`
+  
+  **Example:** `{"key": "value", "count": 42}`
+</ParamField>
+
+## Real-World Example
+
+Here's a complete schema for a blogging platform:
+
+<CodeGroup>
+```graphql User.graphqls
+type User implements Node {
+  id: ID!
+  username: String!
+  email: String!
+  bio: String
+  avatarUrl: String
+  createdAt: DateTime!
+  
+  # Computed fields
+  displayName: String @resolver
+  isVerified: Boolean @resolver
+  
+  # Relationships
+  posts(first: Int, after: String): PostConnection! @resolver
+  followers(first: Int, after: String): UserConnection! @resolver
+  following(first: Int, after: String): UserConnection! @resolver
+}
+
+type UserConnection @connection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int!
+}
+
+type UserEdge @edge {
+  node: User!
+  cursor: String!
+  followedAt: DateTime
+}
+```
+
+```graphql Post.graphqls
+type Post implements Node {
+  id: ID!
+  title: String!
+  content: String!
+  slug: String!
+  status: PostStatus!
+  publishedAt: DateTime
+  createdAt: DateTime!
+  updatedAt: DateTime!
+  
+  # References
+  authorId: ID! @idOf(type: "User")
+  
+  # Relationships
+  author: User @resolver
+  comments(first: Int, after: String): CommentConnection! @resolver
+  tags: [Tag!]! @resolver
+}
+
+enum PostStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+type PostConnection @connection {
+  edges: [PostEdge!]!
+  pageInfo: PageInfo!
+}
+
+type PostEdge @edge {
+  node: Post!
+  cursor: String!
+}
+```
+
+```graphql mutations.graphqls
+extend type Mutation {
+  # User mutations
+  createUser(input: CreateUserInput!): User @resolver
+  updateUser(id: ID! @idOf(type: "User"), input: UpdateUserInput!): User @resolver
+  deleteUser(id: ID! @idOf(type: "User")): Boolean @resolver
+  
+  # Post mutations
+  createPost(input: CreatePostInput!): Post @resolver
+  updatePost(id: ID! @idOf(type: "Post"), input: UpdatePostInput!): Post @resolver
+  publishPost(id: ID! @idOf(type: "Post")): Post @resolver
+  deletePost(id: ID! @idOf(type: "Post")): Boolean @resolver
+}
+
+input CreateUserInput {
+  username: String!
+  email: String!
+  password: String!
+  bio: String
+}
+
+input UpdateUserInput {
+  username: String
+  bio: String
+  avatarUrl: String
+}
+
+input CreatePostInput {
+  title: String!
+  content: String!
+  slug: String!
+  tagIds: [ID!] @idOf(type: "Tag")
+}
+
+input UpdatePostInput {
+  title: String
+  content: String
+  slug: String
+}
+```
+
+```graphql queries.graphqls
+extend type Query {
+  # User queries
+  user(id: ID! @idOf(type: "User")): User @resolver
+  userByUsername(username: String!): User @resolver
+  currentUser: User @resolver
+  
+  # Post queries
+  post(id: ID! @idOf(type: "Post")): Post @resolver
+  postBySlug(slug: String!): Post @resolver
+  posts(
+    first: Int
+    after: String
+    status: PostStatus
+    authorId: ID @idOf(type: "User")
+  ): PostConnection! @resolver
+}
+```
+</CodeGroup>
+
+## Schema Organization Tips
+
+<Tip>
+  **One type per file:** Keep each major type in its own `.graphqls` file for better organization and git history.
+</Tip>
+
+<Tip>
+  **Group related types:** Place connections, edges, and inputs near the types they relate to.
+</Tip>
+
+<Tip>
+  **Separate queries and mutations:** Create dedicated `queries.graphqls` and `mutations.graphqls` files.
+</Tip>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use @idOf for all Node references">
+    This provides type safety and prevents mixing up different ID types:
+    
+    ```graphql
+    # Good
+    authorId: ID! @idOf(type: "User")
+    
+    # Bad - just a string
+    authorId: ID!
+    ```
+  </Step>
+  
+  <Step title="Add @resolver to fields with logic">
+    Mark fields that need computation or come from different sources:
+    
+    ```graphql
+    type User {
+      firstName: String  # Direct field
+      lastName: String   # Direct field
+      displayName: String @resolver  # Computed
+    }
+    ```
+  </Step>
+  
+  <Step title="Use descriptive names">
+    Make field and type names clear and consistent:
+    
+    ```graphql
+    # Good
+    publishedPosts(first: Int): PostConnection!
+    
+    # Less clear
+    posts(first: Int): PostConnection!
+    ```
+  </Step>
+  
+  <Step title="Document with descriptions">
+    Add GraphQL descriptions for better schema documentation:
+    
+    ```graphql
+    \"\"\"
+    A user account in the system.
+    \"\"\"
+    type User implements Node {
+      \"\"\"
+      The user's unique identifier.
+      \"\"\"
+      id: ID!
+    }
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Writing Resolvers" icon="code" href="/guides/writing-resolvers">
+    Learn how to implement resolvers for your schema fields
+  </Card>
+  <Card title="Global IDs" icon="fingerprint" href="/guides/global-ids">
+    Understand type-safe global identifiers
+  </Card>
+</CardGroup>

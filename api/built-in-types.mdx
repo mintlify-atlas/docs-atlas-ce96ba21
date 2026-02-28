@@ -1,0 +1,424 @@
+---
+title: Built-in Types
+description: GraphQL types and interfaces automatically provided by Viaduct
+---
+
+Viaduct automatically provides a set of built-in GraphQL types and interfaces that support common patterns like global object identification and pagination. These types are included when needed and follow GraphQL best practices.
+
+## Node Interface
+
+The standard GraphQL Relay Node interface for global entity identification.
+
+```graphql
+interface Node @scope(to: ["*"]) {
+  id: ID!
+}
+```
+
+**Purpose:**
+- Global Object Identification (Relay specification)
+- Type-safe entity references using Global IDs
+- Automatic node query field generation
+- Cross-module entity references
+
+**Automatic Inclusion:**
+
+Viaduct automatically includes the `Node` interface when:
+- Your schema implements types that extend `Node`
+- You use the `@idOf` directive anywhere in your schema
+
+**Implementation Example:**
+
+```graphql
+type User implements Node {
+  id: ID!
+  name: String!
+  email: String!
+}
+
+type Post implements Node {
+  id: ID!
+  title: String!
+  author: User @resolver
+  content: String!
+}
+
+type Comment implements Node {
+  id: ID!
+  text: String!
+  author: User @resolver
+  post: Post @resolver
+}
+```
+
+**Global ID Format:**
+
+Viaduct encodes type information into Global IDs:
+
+```
+User:123 → Base64("User:123") → "VXNlcjoxMjM="
+Post:456 → Base64("Post:456") → "UG9zdDo0NTY="
+```
+
+This enables the `node` query to automatically route to the correct resolver.
+
+---
+
+## Node Query Fields
+
+Viaduct automatically provides root query fields for node resolution when your schema uses the `Node` interface.
+
+```graphql
+extend type Query @scope(to: ["*"]) {
+  node(id: ID!): Node
+  nodes(ids: [ID!]!): [Node]!
+}
+```
+
+**Automatic Implementation:**
+
+These fields come with built-in resolvers that:
+1. Decode the Global ID to extract type and internal ID
+2. Route to the appropriate type's node resolver
+3. Return the resolved entity
+
+### node
+
+Fetches a single entity by its Global ID.
+
+<ParamField path="id" type="ID!" required>
+  Global ID of the entity to fetch
+</ParamField>
+
+**Returns:** `Node` - The entity, or null if not found
+
+**Example Query:**
+
+```graphql
+query {
+  node(id: "VXNlcjoxMjM=") {
+    id
+    ... on User {
+      name
+      email
+    }
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "node": {
+      "id": "VXNlcjoxMjM=",
+      "name": "Alice",
+      "email": "alice@example.com"
+    }
+  }
+}
+```
+
+### nodes
+
+Fetches multiple entities by their Global IDs (batch operation).
+
+<ParamField path="ids" type="[ID!]!" required>
+  List of Global IDs to fetch
+</ParamField>
+
+**Returns:** `[Node]!` - List of entities (nulls for not found)
+
+**Example Query:**
+
+```graphql
+query {
+  nodes(ids: ["VXNlcjoxMjM=", "UG9zdDo0NTY="]) {
+    id
+    __typename
+    ... on User {
+      name
+    }
+    ... on Post {
+      title
+    }
+  }
+}
+```
+
+**Response:**
+
+```json
+{
+  "data": {
+    "nodes": [
+      {
+        "id": "VXNlcjoxMjM=",
+        "__typename": "User",
+        "name": "Alice"
+      },
+      {
+        "id": "UG9zdDo0NTY=",
+        "__typename": "Post",
+        "title": "My First Post"
+      }
+    ]
+  }
+}
+```
+
+---
+
+## Implementing Node Resolvers
+
+When a type implements `Node`, you must provide a node resolver:
+
+```kotlin
+class UserNodeResolver : UserNodeResolverBase() {
+    override suspend fun resolve(ctx: NodeExecutionContext<User>): User? {
+        val internalId = ctx.id.internalID
+        return userRepository.findById(internalId)
+    }
+}
+```
+
+**Context Properties:**
+
+<ResponseField name="id" type="GlobalID<User>">
+  The Global ID being resolved. Extract the internal ID with `ctx.id.internalID`
+</ResponseField>
+
+<ResponseField name="requestContext" type="Any?">
+  Deployment-specific request context (auth, tracing, etc.)
+</ResponseField>
+
+---
+
+## PageInfo Type
+
+Standard type for pagination metadata in Relay-style connections.
+
+```graphql
+type PageInfo {
+  hasNextPage: Boolean!
+  hasPreviousPage: Boolean!
+  startCursor: String
+  endCursor: String
+}
+```
+
+**Automatically included when:** Your schema uses connection types with `@connection` directive.
+
+**Fields:**
+
+<ResponseField name="hasNextPage" type="Boolean!" required>
+  Whether more items exist after the current page
+</ResponseField>
+
+<ResponseField name="hasPreviousPage" type="Boolean!" required>
+  Whether more items exist before the current page
+</ResponseField>
+
+<ResponseField name="startCursor" type="String">
+  Cursor of the first item in this page (null if page is empty)
+</ResponseField>
+
+<ResponseField name="endCursor" type="String">
+  Cursor of the last item in this page (null if page is empty)
+</ResponseField>
+
+**Example Response:**
+
+```json
+{
+  "data": {
+    "allUsers": {
+      "edges": [
+        { "node": { "name": "Alice" }, "cursor": "YXJyYXljb25uZWN0aW9uOjA=" },
+        { "node": { "name": "Bob" }, "cursor": "YXJyYXljb25uZWN0aW9uOjE=" }
+      ],
+      "pageInfo": {
+        "hasNextPage": true,
+        "hasPreviousPage": false,
+        "startCursor": "YXJyYXljb25uZWN0aW9uOjA=",
+        "endCursor": "YXJyYXljb25uZWN0aW9uOjE="
+      }
+    }
+  }
+}
+```
+
+---
+
+## Connection Types
+
+Connection types follow the Relay Connection specification for cursor-based pagination.
+
+**Pattern:**
+
+```graphql
+type <EntityName>Connection @connection {
+  edges: [<EntityName>Edge!]!
+  pageInfo: PageInfo!
+  # Optional additional fields
+  totalCount: Int
+}
+
+type <EntityName>Edge @edge {
+  node: <EntityName>!
+  cursor: String!
+  # Optional edge metadata
+}
+```
+
+**Example:**
+
+```graphql
+type UserConnection @connection {
+  edges: [UserEdge!]!
+  pageInfo: PageInfo!
+  totalCount: Int
+}
+
+type UserEdge @edge {
+  node: User!
+  cursor: String!
+}
+
+type Query {
+  allUsers(
+    first: Int
+    after: String
+    last: Int
+    before: String
+  ): UserConnection @resolver
+}
+```
+
+**Standard Arguments:**
+
+<ParamField path="first" type="Int">
+  Number of items to fetch from the start (forward pagination)
+</ParamField>
+
+<ParamField path="after" type="String">
+  Cursor after which to start fetching (forward pagination)
+</ParamField>
+
+<ParamField path="last" type="Int">
+  Number of items to fetch from the end (backward pagination)
+</ParamField>
+
+<ParamField path="before" type="String">
+  Cursor before which to start fetching (backward pagination)
+</ParamField>
+
+**Example Query:**
+
+```graphql
+query {
+  allUsers(first: 10, after: "cursor123") {
+    edges {
+      node {
+        id
+        name
+        email
+      }
+      cursor
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+    totalCount
+  }
+}
+```
+
+---
+
+## Root Types
+
+Viaduct intelligently manages root types based on your schema.
+
+### Query
+
+**Always created.** Required by the GraphQL specification.
+
+**Usage:**
+
+```graphql
+extend type Query {
+  user(id: ID!): User @resolver
+  users(limit: Int = 10): [User!]! @resolver
+  searchUsers(query: String!): [User!]! @resolver
+}
+```
+
+**Important:** Always use `extend type Query`, never define `type Query` directly. Viaduct creates the base Query type automatically.
+
+### Mutation
+
+**Created only when mutation extensions exist.** Viaduct automatically creates the `Mutation` root type when it detects `extend type Mutation` in your schema.
+
+**Usage:**
+
+```graphql
+extend type Mutation {
+  createUser(input: CreateUserInput!): CreateUserPayload @resolver
+  updateUser(id: ID!, input: UpdateUserInput!): UpdateUserPayload @resolver
+  deleteUser(id: ID!): Boolean @resolver
+}
+```
+
+### Subscription
+
+**Created only when subscription extensions exist.** Similar to Mutation, Viaduct creates this type when needed.
+
+**Usage:**
+
+```graphql
+extend type Subscription {
+  userUpdated(id: ID!): User @resolver
+  newMessage: Message @resolver
+}
+```
+
+---
+
+## Type Summary
+
+| Type | Purpose | Auto-Included When |
+|------|---------|--------------------|
+| `Node` | Global object identification interface | Types implement Node or `@idOf` is used |
+| `Query.node` | Fetch entity by Global ID | Node interface is included |
+| `Query.nodes` | Batch fetch entities by Global IDs | Node interface is included |
+| `PageInfo` | Pagination metadata | Connection types are defined |
+| `Query` | Root query type | Always (required by spec) |
+| `Mutation` | Root mutation type | `extend type Mutation` exists in schema |
+| `Subscription` | Root subscription type | `extend type Subscription` exists in schema |
+
+## Best Practices
+
+### Do
+
+- **Implement Node for entities** - Use for globally identifiable objects
+- **Use Global IDs for references** - Leverage `@idOf` for type safety
+- **Follow connection patterns** - Use standard Relay pagination with `@connection` and `@edge`
+- **Always extend root types** - Use `extend type Query`, not `type Query`
+- **Provide node resolvers** - Implement efficient node resolution for all Node types
+
+### Don't
+
+- **Don't manually define Node interface** - It's added automatically when used
+- **Don't manually implement node queries** - They're provided automatically
+- **Don't redefine root types** - Viaduct creates them automatically
+- **Don't use Node for non-entities** - Reserve for objects with stable identifiers
+- **Don't expose internal IDs directly** - Use Global IDs for public API
+
+## See Also
+
+- [Directives](directives) - `@resolver`, `@idOf`, `@connection`, `@edge`
+- [Scalars](scalars) - Custom scalar types
+- [Tenant API](tenant-api) - Implementing node resolvers

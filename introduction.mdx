@@ -1,0 +1,159 @@
+---
+title: Introduction to Viaduct
+description: A GraphQL-based system that provides a unified interface for accessing and interacting with any data source
+---
+
+<img
+  className="block dark:hidden"
+  src="/logo/light.svg"
+  alt="Viaduct logo"
+  width="200"
+/>
+<img
+  className="hidden dark:block"
+  src="/logo/dark.svg"
+  alt="Viaduct logo"
+  width="200"
+/>
+
+# Welcome to Viaduct
+
+Viaduct is a GraphQL-based system that provides a unified interface for accessing and interacting with any data source. Built by Airbnb and battle-tested in production at scale, Viaduct is an open source data-oriented service mesh designed to help you build powerful, scalable applications with ease and confidence.
+
+<Note>
+  The Viaduct engine is production-ready and proven reliable at scale. The developer API is under active development, with clear guidance on API stability in the roadmap.
+</Note>
+
+## Core principles
+
+Three principles have guided Viaduct since day one and continue to anchor the project:
+
+### Central schema
+
+Viaduct serves a single, integrated schema connecting all of your domains across your company—the central schema. While that schema is developed in a decentralized manner by many teams, it's one highly connected graph. This unified approach eliminates the complexity of managing multiple schemas and provides a consistent interface for all your data.
+
+### Hosted business logic
+
+Teams host their business logic directly in Viaduct. This runs counter to what many consider to be best practices in GraphQL, which suggest that GraphQL servers should be a thin layer over microservices that host the real business logic. Viaduct is a serverless platform for hosting business logic, allowing you to focus on writing business logic rather than on operational issues.
+
+### Re-entrancy
+
+At the heart of Viaduct's developer experience is what we call re-entrancy: logic hosted on Viaduct composes with other logic hosted on Viaduct by issuing GraphQL fragments and queries. Re-entrancy is crucial for maintaining modularity in a large codebase and avoiding classic monolith hazards.
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Type-safe resolvers" icon="shield-check">
+    Write business logic with generated Kotlin classes that provide compile-time safety and IDE autocomplete
+  </Card>
+  
+  <Card title="Schema-first development" icon="file-code">
+    Define your API with GraphQL schemas and let Viaduct generate the code you need to implement it
+  </Card>
+  
+  <Card title="Modular architecture" icon="cubes">
+    Build tenant modules that can depend on each other and compose together through re-entrant queries
+  </Card>
+  
+  <Card title="Built-in pagination" icon="list">
+    Implement cursor-based pagination with Relay Connection specification support out of the box
+  </Card>
+  
+  <Card title="Global IDs" icon="fingerprint">
+    Type-safe identification for Node objects with `GlobalID<T>` types that embed both type and ID
+  </Card>
+  
+  <Card title="Fast iteration" icon="bolt">
+    Development server with GraphiQL and auto-reloading for rapid prototyping and testing
+  </Card>
+</CardGroup>
+
+## How Viaduct works
+
+Viaduct applications follow a simple pattern:
+
+1. **Define your schema** - Write GraphQL schemas with `@resolver` directives to mark fields that need business logic
+2. **Generate code** - Viaduct generates GraphQL Representational Types (GRTs) and resolver base classes
+3. **Implement resolvers** - Extend the generated base classes and implement the `resolve` function
+4. **Execute queries** - Create a Viaduct engine instance and execute GraphQL operations
+
+Here's a simple example:
+
+```graphql schema.graphqls
+extend type Query {
+  greeting: String @resolver
+}
+```
+
+```kotlin GreetingResolver.kt
+import viaduct.api.Resolver
+import com.example.viadapp.resolvers.resolverbases.QueryResolvers
+
+@Resolver
+class GreetingResolver : QueryResolvers.Greeting() {
+    override suspend fun resolve(ctx: Context): String {
+        return "Hello, World!"
+    }
+}
+```
+
+```kotlin ViaductApplication.kt
+val viaduct = BasicViaductFactory.create(
+    tenantRegistrationInfo = TenantRegistrationInfo(
+        tenantPackagePrefix = "com.example.viadapp"
+    )
+)
+
+val result = viaduct.execute(
+    ExecutionInput.create(
+        operationText = "{ greeting }",
+        variables = emptyMap()
+    )
+)
+```
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running in minutes with the CLI starter demo
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Set up Viaduct dependencies in your Gradle project
+  </Card>
+  
+  <Card title="Core concepts" icon="book" href="/essentials/concepts">
+    Understand resolvers, GRTs, and the Viaduct execution model
+  </Card>
+  
+  <Card title="API reference" icon="code" href="/api-reference">
+    Explore the complete Viaduct API documentation
+  </Card>
+</CardGroup>
+
+## Why Viaduct?
+
+Viaduct is designed for teams building complex, data-intensive applications that need:
+
+- **Unified data access** - Single GraphQL API across all your services and data sources
+- **Type safety** - Kotlin's type system ensures correctness at compile time
+- **Scalability** - Proven in production at Airbnb serving millions of requests
+- **Developer productivity** - Code generation eliminates boilerplate and catches errors early
+- **Modularity** - Build and deploy tenant modules independently while maintaining schema cohesion
+
+<Tip>
+  Check out the [demo applications](https://github.com/viaduct-dev) to see Viaduct in action, from simple CLI tools to full-featured web services.
+</Tip>
+
+## Community and support
+
+Viaduct is an open source project committed to fostering an inclusive and collaborative community where external developers can contribute, innovate, and help shape the future of data-oriented development.
+
+- **GitHub**: [github.com/airbnb/viaduct](https://github.com/airbnb/viaduct)
+- **Documentation**: [viaduct.airbnb.tech](https://viaduct.airbnb.tech)
+- **Demo apps**: [github.com/viaduct-dev](https://github.com/viaduct-dev)
+
+<Warning>
+  The Viaduct developer API is under active development. Check the [roadmap](https://viaduct.airbnb.tech/roadmap) to see which parts of the API are more or less subject to future change.
+</Warning>

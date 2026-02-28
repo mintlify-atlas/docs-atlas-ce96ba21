@@ -1,0 +1,393 @@
+---
+title: Project Setup
+description: Setting up a Viaduct tenant project structure with Gradle
+---
+
+This guide walks you through setting up a new Viaduct tenant project, including the proper Gradle configuration, module structure, and directory layout.
+
+## Project Structure
+
+A typical Viaduct project follows a modular architecture:
+
+```
+my-viaduct-app/
+├── build.gradle.kts          # Application build configuration
+├── settings.gradle.kts       # Multi-module settings
+├── modules/
+│   ├── users/               # User management module
+│   │   ├── build.gradle.kts
+│   │   └── src/main/
+│   │       ├── kotlin/      # Resolver implementations
+│   │       └── viaduct/schema/  # GraphQL schemas
+│   └── orders/              # Orders module
+│       ├── build.gradle.kts
+│       └── src/main/
+│           ├── kotlin/
+│           └── viaduct/schema/
+└── common/                  # Shared utilities
+    └── src/main/kotlin/
+```
+
+<Note>
+  Viaduct uses a **modular architecture** where each domain area (users, orders, etc.) is a separate Gradle module with its own schema and resolvers.
+</Note>
+
+## Gradle Plugins
+
+Viaduct provides two Gradle plugins:
+
+### Application Plugin
+
+Apply to your root application module:
+
+```kotlin title="build.gradle.kts"
+plugins {
+    alias(libs.plugins.kotlinJvm)
+    alias(libs.plugins.viaduct.application)
+}
+
+viaductApplication {
+    grtPackageName.set("viaduct.api.grts")
+    modulePackagePrefix.set("com.example.myapp")
+}
+```
+
+**Configuration options:**
+
+<ParamField path="grtPackageName" type="String" default="viaduct.api.grts">
+  Package name for generated GraphQL Representational Types (GRTs)
+</ParamField>
+
+<ParamField path="modulePackagePrefix" type="String" required>
+  Base package for your application modules (e.g., `com.example.myapp`)
+</ParamField>
+
+### Module Plugin
+
+Apply to each tenant module:
+
+```kotlin title="modules/users/build.gradle.kts"
+plugins {
+    `java-library`
+    alias(libs.plugins.kotlinJvm)
+    alias(libs.plugins.viaduct.module)
+}
+
+viaductModule {
+    modulePackageSuffix.set("users")
+}
+```
+
+<ParamField path="modulePackageSuffix" type="String" required>
+  Suffix for this module's package (combined with `modulePackagePrefix`)
+</ParamField>
+
+## Complete Application Setup
+
+<Steps>
+  <Step title="Create the application build file">
+    Create `build.gradle.kts` for your main application:
+
+    ```kotlin title="build.gradle.kts"
+    plugins {
+        alias(libs.plugins.kotlinJvm)
+        alias(libs.plugins.ktor)
+        alias(libs.plugins.viaduct.application)
+    }
+
+    application {
+        mainClass.set("com.example.myapp.ApplicationKt")
+    }
+
+    viaductApplication {
+        modulePackagePrefix.set("com.example.myapp")
+    }
+
+    dependencies {
+        // Viaduct core dependencies
+        implementation(libs.viaduct.api)
+        implementation(libs.viaduct.runtime)
+
+        // Your web framework (Ktor, Micronaut, etc.)
+        implementation(libs.ktor.server.core)
+        implementation(libs.ktor.server.netty)
+
+        // Kotlin dependencies
+        implementation(libs.kotlin.reflect)
+        implementation(libs.kotlinx.coroutines.reactor)
+
+        // Include your modules
+        runtimeOnly(project(":modules:users"))
+        runtimeOnly(project(":modules:orders"))
+
+        // Testing
+        testImplementation(libs.viaduct.test.fixtures)
+        testImplementation(libs.kotest.runner.junit)
+    }
+    ```
+  </Step>
+
+  <Step title="Configure multi-module settings">
+    Create `settings.gradle.kts` to define your modules:
+
+    ```kotlin title="settings.gradle.kts"
+    rootProject.name = "my-viaduct-app"
+
+    include(":modules:users")
+    include(":modules:orders")
+    include(":common")
+    ```
+  </Step>
+
+  <Step title="Create a tenant module">
+    Create `modules/users/build.gradle.kts`:
+
+    ```kotlin title="modules/users/build.gradle.kts"
+    plugins {
+        `java-library`
+        alias(libs.plugins.kotlinJvm)
+        alias(libs.plugins.kotlinKapt)
+        alias(libs.plugins.viaduct.module)
+    }
+
+    viaductModule {
+        modulePackageSuffix.set("users")
+    }
+
+    dependencies {
+        api(libs.viaduct.api)
+        implementation(libs.viaduct.runtime)
+
+        // Dependency injection (optional but recommended)
+        implementation(libs.micronaut.inject)
+        kapt(libs.micronaut.inject.java)
+        kapt(libs.micronaut.inject.kotlin)
+
+        // Share common utilities
+        implementation(project(":common"))
+    }
+    ```
+  </Step>
+
+  <Step title="Create the schema directory">
+    Create the schema directory structure:
+
+    ```bash
+    mkdir -p modules/users/src/main/viaduct/schema
+    ```
+
+    Add your GraphQL schema file:
+
+    ```graphql title="modules/users/src/main/viaduct/schema/User.graphqls"
+    type User implements Node {
+      id: ID!
+      name: String!
+      email: String!
+    }
+
+    extend type Query {
+      user(id: ID! @idOf(type: "User")): User @resolver
+    }
+    ```
+
+    <Note>
+      Schema files must be placed in `src/main/viaduct/schema/` with the `.graphqls` extension.
+    </Note>
+  </Step>
+
+  <Step title="Create resolver directory">
+    Create the Kotlin source directory:
+
+    ```bash
+    mkdir -p modules/users/src/main/kotlin/com/example/myapp/users/resolvers
+    ```
+
+    Your resolver classes will go here (covered in [Writing Resolvers](/guides/writing-resolvers)).
+  </Step>
+</Steps>
+
+## Version Catalog Setup
+
+Use Gradle's version catalog for dependency management:
+
+```toml title="gradle/libs.versions.toml"
+[versions]
+viaduct = "0.14.0"
+kotlin = "1.9.22"
+ktor = "2.3.7"
+
+[libraries]
+viaduct-api = { module = "com.viaduct:viaduct-api", version.ref = "viaduct" }
+viaduct-runtime = { module = "com.viaduct:viaduct-runtime", version.ref = "viaduct" }
+viaduct-test-fixtures = { module = "com.viaduct:viaduct-test-fixtures", version.ref = "viaduct" }
+kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect", version.ref = "kotlin" }
+kotlinx-coroutines-reactor = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-reactor" }
+
+[plugins]
+kotlinJvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlinKapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
+viaduct-application = { id = "com.viaduct.application", version.ref = "viaduct" }
+viaduct-module = { id = "com.viaduct.module", version.ref = "viaduct" }
+```
+
+## Directory Conventions
+
+### Schema Files
+
+- **Location:** `src/main/viaduct/schema/`
+- **Extension:** `.graphqls`
+- **Pattern:** One file per type is recommended (e.g., `User.graphqls`, `Order.graphqls`)
+
+### Resolver Files
+
+- **Location:** `src/main/kotlin/<package>/resolvers/`
+- **Naming:** Descriptive names like `UserNodeResolver.kt`, `OrdersQueryResolver.kt`
+- **Package:** Follows your `modulePackagePrefix` + `modulePackageSuffix`
+
+### Generated Code
+
+Viaduct generates code in `build/generated/`:
+
+- **GRTs:** `viaduct.api.grts` package
+- **Resolver bases:** `<modulePackagePrefix>.<suffix>.resolverbases` package
+
+<Warning>
+  Never edit generated files directly. They are regenerated on every build.
+</Warning>
+
+## Building Your Project
+
+<CodeGroup>
+```bash Build
+./gradlew build
+```
+
+```bash Run development server
+./gradlew --continuous serve
+```
+
+```bash Run tests
+./gradlew test
+```
+</CodeGroup>
+
+The `--continuous` flag enables auto-reload when you change schema or resolver files.
+
+## Common Module Pattern
+
+Create a common module for shared utilities:
+
+```kotlin title="common/build.gradle.kts"
+plugins {
+    `java-library`
+    alias(libs.plugins.kotlinJvm)
+}
+
+dependencies {
+    api(libs.viaduct.api)
+    implementation(libs.micronaut.inject)
+}
+```
+
+```kotlin title="common/src/main/kotlin/com/example/myapp/common/Context.kt"
+package com.example.myapp.common
+
+import jakarta.inject.Inject
+import jakarta.inject.Singleton
+
+@Singleton
+class RequestContext @Inject constructor() {
+    // Shared request context, user authentication, etc.
+}
+```
+
+Modules can depend on common:
+
+```kotlin
+dependencies {
+    implementation(project(":common"))
+}
+```
+
+## Integration Examples
+
+### With Ktor
+
+```kotlin title="src/main/kotlin/Application.kt"
+import io.ktor.server.application.*
+import io.ktor.server.routing.*
+import viaduct.service.api.Viaduct
+
+fun Application.module() {
+    val viaduct = createViaductInstance()
+
+    routing {
+        post("/graphql") {
+            val request = call.receive<GraphQLRequest>()
+            val result = viaduct.execute(
+                query = request.query,
+                variables = request.variables,
+                operationName = request.operationName
+            )
+            call.respond(result)
+        }
+    }
+}
+```
+
+### With Micronaut
+
+```kotlin title="src/main/kotlin/GraphQLController.kt"
+import io.micronaut.http.annotation.*
+import jakarta.inject.Inject
+import viaduct.service.api.Viaduct
+
+@Controller("/graphql")
+class GraphQLController @Inject constructor(
+    private val viaduct: Viaduct
+) {
+    @Post
+    suspend fun execute(@Body request: GraphQLRequest): GraphQLResponse {
+        return viaduct.execute(
+            query = request.query,
+            variables = request.variables,
+            operationName = request.operationName
+        )
+    }
+}
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Defining Schemas" icon="code" href="/guides/defining-schema">
+    Learn how to write GraphQL schemas with Viaduct directives
+  </Card>
+  <Card title="Writing Resolvers" icon="function" href="/guides/writing-resolvers">
+    Implement field and node resolvers for your schema
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build fails with 'unresolved reference' errors">
+    Ensure you have:
+    1. Applied the correct Gradle plugins (`viaduct.application` or `viaduct.module`)
+    2. Created schema files in `src/main/viaduct/schema/`
+    3. Run `./gradlew build` to generate GRTs
+  </Accordion>
+
+  <Accordion title="Schema files not being picked up">
+    Check that:
+    - Files are in `src/main/viaduct/schema/` directory
+    - Files have `.graphqls` extension
+    - You've run a Gradle build after creating them
+  </Accordion>
+
+  <Accordion title="Module package prefix issues">
+    Ensure `modulePackagePrefix` in the application matches the package structure of your modules.
+    
+    Example: If prefix is `com.example.myapp` and module suffix is `users`, your resolvers should be in `com.example.myapp.users.*`
+  </Accordion>
+</AccordionGroup>

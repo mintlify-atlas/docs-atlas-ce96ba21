@@ -1,0 +1,430 @@
+---
+title: Module Gradle Plugin
+description: Gradle plugin for building Viaduct modules with schema and code generation
+---
+
+The Viaduct Module Gradle Plugin (`com.airbnb.viaduct.module-gradle-plugin`) is applied to individual module projects within a Viaduct application. It handles schema assembly, resolver code generation, and integration with the application-level plugin.
+
+## Overview
+
+The module plugin provides:
+
+- **Schema partition assembly** - Collects GraphQL schema files from the module
+- **Resolver base class generation** - Generates abstract resolver classes from schema
+- **GRT (Generated Runtime Types) integration** - Provides access to generated type classes
+- **Build-time validation** - Prevents direct module-to-module dependencies
+- **Kotlin compiler configuration** - Enables context receivers for resolvers
+
+## Installation
+
+**In module `build.gradle.kts`:**
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    id("com.airbnb.viaduct.module-gradle-plugin") version "<version>"
+}
+
+viaductModule {
+    modulePackageSuffix.set("filmography")  // Optional
+}
+
+dependencies {
+    implementation("com.airbnb.viaduct:tenant-api:<version>")
+    // Your module dependencies
+}
+```
+
+**Directory Structure:**
+
+```
+modules/filmography/
+  ├── build.gradle.kts
+  ├── src/
+  │   ├── main/
+  │   │   ├── kotlin/
+  │   │   │   └── com/example/filmography/
+  │   │   │       ├── resolvers/
+  │   │   │       └── FilmographyModule.kt
+  │   │   └── viaduct/
+  │   │       └── schema/
+  │   │           ├── Character.graphqls
+  │   │           ├── Film.graphqls
+  │   │           └── Query.graphqls
+  │   └── test/
+  └── build/
+      ├── generated/viaduct/
+      │   └── resolvers/
+      └── viaduct-schema-partition/
+```
+
+## Extension
+
+### viaductModule
+
+Configuration extension for module-specific settings.
+
+```kotlin
+viaductModule {
+    modulePackageSuffix.set("filmography")
+}
+```
+
+#### Properties
+
+<ParamField path="modulePackageSuffix" type="Property<String>">
+  Kotlin package name suffix for this module. Used to organize generated code and schema partitions.
+  
+  - **Default:** Empty string (when used with application plugin)
+  - **Example:** `"filmography"` results in package `com.example.filmography`
+  - **Effect:** Affects generated code package names and schema partition paths
+</ParamField>
+
+**Example:**
+
+```kotlin
+viaductModule {
+    // Module will use com.example.myapp.users package
+    modulePackageSuffix.set("users")
+}
+```
+
+## Tasks
+
+The module plugin registers several Gradle tasks.
+
+### prepareViaductSchemaPartition
+
+Assembles the module's schema partition from GraphQL files.
+
+**Type:** `AssembleSchemaPartitionTask`
+
+**Input:**
+- GraphQL schema files from `src/main/viaduct/schema/`
+
+**Output:**
+- Schema partition directory in `build/viaduct-schema-partition/`
+
+**Configuration:**
+
+```kotlin
+tasks.named<AssembleSchemaPartitionTask>("prepareViaductSchemaPartition") {
+    graphqlSrcDir.set(layout.projectDirectory.dir("src/main/viaduct/schema"))
+    prefixPath.set("filmography/graphql")
+    outputDirectory.set(file("build/viaduct-schema-partition"))
+}
+```
+
+**Properties:**
+
+<ResponseField name="graphqlSrcDir" type="DirectoryProperty">
+  Directory containing GraphQL schema files (`.graphqls` files)
+  
+  **Default:** `src/main/viaduct/schema`
+</ResponseField>
+
+<ResponseField name="prefixPath" type="Property<String>">
+  Prefix path for organizing the schema partition (derived from `modulePackageSuffix`)
+  
+  **Example:** `"filmography/graphql"` for module suffix `"filmography"`
+</ResponseField>
+
+<ResponseField name="outputDirectory" type="DirectoryProperty">
+  Output directory for the assembled schema partition
+  
+  **Default:** `build/viaduct-schema-partition`
+</ResponseField>
+
+---
+
+### generateViaductResolverBases
+
+Generates abstract resolver base classes from the central schema.
+
+**Type:** `GenerateResolverBasesTask`
+
+**Input:**
+- Central schema from application plugin (all modules combined)
+
+**Output:**
+- Generated resolver base classes in `build/generated/viaduct/resolvers/`
+
+**Properties:**
+
+<ResponseField name="centralSchemaFiles" type="ConfigurableFileCollection">
+  GraphQL schema files from the central schema (provided by application plugin)
+</ResponseField>
+
+<ResponseField name="outputDirectory" type="DirectoryProperty">
+  Output directory for generated resolver base classes
+  
+  **Default:** `build/generated/viaduct/resolvers`
+</ResponseField>
+
+<ResponseField name="buildFlags" type="MapProperty<String, String>">
+  Build flags for code generation (e.g., feature flags)
+</ResponseField>
+
+<ResponseField name="tenantFromSourceRegex" type="Property<String>">
+  Regex pattern for extracting module identity from schema paths
+</ResponseField>
+
+**Generated Code Example:**
+
+For this schema:
+```graphql
+type Query {
+  user(id: ID!): User @resolver
+}
+
+type User implements Node @resolver {
+  id: ID!
+  name: String!
+}
+```
+
+Generates:
+```kotlin
+// UserQueryResolver.kt
+abstract class UserQueryResolver : ResolverBase<User> {
+    abstract suspend fun resolve(
+        ctx: FieldExecutionContext<Query, Query, UserQueryArguments, User>
+    ): User?
+}
+
+// UserNodeResolver.kt
+abstract class UserNodeResolver : NodeResolverBase<User> {
+    abstract suspend fun resolve(
+        ctx: NodeExecutionContext<User>
+    ): User?
+}
+```
+
+---
+
+### viaductCodegen
+
+Convenience task that runs all code generation for the module.
+
+**Depends on:**
+- `generateViaductResolverBases`
+- Indirectly triggers GRT generation at application level
+
+**Usage:**
+
+```bash
+./gradlew :modules:filmography:viaductCodegen
+```
+
+## Configurations
+
+The plugin creates several Gradle configurations for artifact exchange.
+
+### schemaPartitionOutgoing
+
+**Type:** Consumable configuration
+
+**Purpose:** Provides this module's schema partition to the application plugin
+
+**Attributes:**
+- `viaductKind = SCHEMA_PARTITION`
+
+**Artifacts:**
+- Output of `prepareViaductSchemaPartition` task
+
+---
+
+### centralSchemaIncoming
+
+**Type:** Resolvable configuration
+
+**Purpose:** Receives the central schema from the application plugin (used for resolver generation)
+
+**Attributes:**
+- `viaductKind = CENTRAL_SCHEMA`
+
+---
+
+### grtClassesIncoming
+
+**Type:** Resolvable configuration
+
+**Purpose:** Receives GRT (Generated Runtime Types) JAR from the application plugin
+
+**Attributes:**
+- `viaductKind = GRT_CLASSES`
+- `usage = JAVA_RUNTIME`
+- `category = LIBRARY`
+- `libraryElements = JAR`
+
+**Integration:**
+The GRT classes are automatically added to:
+- `implementation` configuration (for main source set)
+- `testImplementation` configuration (for test source set)
+- `testFixturesImplementation` configuration (if `java-test-fixtures` plugin is applied)
+
+## Validation
+
+### No Direct Module Dependencies
+
+The plugin enforces that modules cannot depend directly on each other. This ensures proper encapsulation.
+
+**Blocked:**
+```kotlin
+// In modules/users/build.gradle.kts
+dependencies {
+    implementation(project(":modules:posts"))  // ❌ ERROR!
+}
+```
+
+**Error Message:**
+```
+Module :modules:users must not depend directly on :modules:posts;
+used in build.gradle.kts, use the central schema for inter-module references.
+```
+
+**Allowed:**
+```kotlin
+// Use types from other modules via the central schema
+type Post {
+  author: User  # User type from users module
+}
+```
+
+The central schema provides cross-module type references automatically.
+
+## Kotlin Configuration
+
+### Context Receivers
+
+The plugin automatically enables Kotlin context receivers, which are used by generated resolver classes.
+
+**Added compiler argument:**
+```kotlin
+kotlinExt.compilerOptions {
+    freeCompilerArgs.add("-Xcontext-receivers")
+}
+```
+
+### Source Sets
+
+Generated resolver base classes are automatically added to the main Kotlin source set:
+
+```kotlin
+kotlin.sourceSets.main {
+    kotlin.srcDir("build/generated/viaduct/resolvers")
+}
+```
+
+## IDE Integration
+
+The plugin configures IntelliJ IDEA to recognize generated sources:
+
+**Generated directories marked as source roots:**
+- `build/generated/viaduct/resolvers`
+
+**Benefits:**
+- Code completion for generated resolver classes
+- Navigation to generated code
+- No red squiggles for generated types
+
+## Example Module
+
+Complete example of a Viaduct module:
+
+**`build.gradle.kts`:**
+```kotlin
+plugins {
+    kotlin("jvm")
+    id("com.airbnb.viaduct.module-gradle-plugin") version "1.0.0"
+}
+
+viaductModule {
+    modulePackageSuffix.set("filmography")
+}
+
+dependencies {
+    implementation("com.airbnb.viaduct:tenant-api:1.0.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
+}
+```
+
+**`src/main/viaduct/schema/Character.graphqls`:**
+```graphql
+extend type Query {
+  character(id: ID! @idOf(type: "Character")): Character @resolver
+  allCharacters(limit: Int = 10): [Character!]! @resolver
+}
+
+type Character implements Node @resolver {
+  id: ID!
+  name: String!
+  appearsIn: [Film!]! @resolver
+}
+```
+
+**`src/main/kotlin/.../CharacterResolvers.kt`:**
+```kotlin
+package com.example.filmography.resolvers
+
+import com.example.filmography.Character
+import com.example.filmography.CharacterQueryResolver
+import com.example.filmography.CharacterNodeResolver
+
+class CharacterQueryResolverImpl : CharacterQueryResolver() {
+    override suspend fun resolve(ctx: FieldExecutionContext<...>): Character? {
+        val characterId = ctx.arguments.id.internalID
+        return fetchCharacter(characterId)
+    }
+}
+
+class CharacterNodeResolverImpl : CharacterNodeResolver() {
+    override suspend fun resolve(ctx: NodeExecutionContext<Character>): Character? {
+        return fetchCharacter(ctx.id.internalID)
+    }
+}
+```
+
+## Best Practices
+
+### Do
+
+- **Use meaningful module suffixes** - Helps organize code and schemas
+- **Keep modules focused** - Each module should have a clear domain boundary
+- **Run `viaductCodegen` after schema changes** - Regenerate resolvers when schema changes
+- **Commit generated code to version control** - Optional but recommended for CI/CD
+
+### Don't
+
+- **Don't add direct module dependencies** - Use the central schema for cross-module types
+- **Don't modify generated classes** - They'll be overwritten on next generation
+- **Don't skip code generation** - Always run after pulling schema changes
+
+## Troubleshooting
+
+### Generated classes not found
+
+**Solution:** Run code generation:
+```bash
+./gradlew :modules:yourmodule:viaductCodegen
+```
+
+### IDE doesn't recognize generated code
+
+**Solution:** Sync Gradle project:
+- IntelliJ: File → Sync Project with Gradle Files
+- Or run: `./gradlew idea` (if using IDEA plugin)
+
+### Schema changes not reflected
+
+**Solution:** Clean and regenerate:
+```bash
+./gradlew clean :modules:yourmodule:viaductCodegen
+```
+
+## See Also
+
+- [Application Plugin](application-plugin) - Root application plugin
+- [Tenant API](tenant-api) - Implementing generated resolvers
+- [Directives](directives) - Schema directives (`@resolver`, etc.)
+- [Module Architecture](/docs/architecture/modules) - Designing modules

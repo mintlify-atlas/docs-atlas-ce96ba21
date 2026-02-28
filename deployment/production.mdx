@@ -1,0 +1,647 @@
+---
+title: Production Deployment
+description: Best practices and considerations for deploying Viaduct to production
+---
+
+## Overview
+
+Deploying Viaduct to production requires careful consideration of performance, monitoring, error handling, and scalability. This guide covers best practices and production-specific concerns.
+
+## Performance Optimization
+
+### Connection Pooling
+
+Configure connection pooling for all data sources to avoid connection overhead:
+
+```kotlin
+import com.zaxxer.hikari.HikariConfig
+import com.zaxxer.hikari.HikariDataSource
+
+val config = HikariConfig().apply {
+    jdbcUrl = "jdbc:postgresql://localhost:5432/mydb"
+    username = "user"
+    password = "password"
+    maximumPoolSize = 20
+    minimumIdle = 5
+    connectionTimeout = 30000
+    idleTimeout = 600000
+    maxLifetime = 1800000
+}
+
+val dataSource = HikariDataSource(config)
+```
+
+### Query Complexity Limits
+
+Protect your API from expensive queries:
+
+```kotlin
+import graphql.analysis.MaxQueryComplexityInstrumentation
+import graphql.analysis.MaxQueryDepthInstrumentation
+
+val viaduct = ViaductBuilder()
+    .withMaxQueryComplexity(1000)  // Limit total complexity
+    .withMaxQueryDepth(15)         // Limit nesting depth
+    .build()
+```
+
+### Caching Strategies
+
+Implement caching at multiple levels:
+
+**1. DataLoader for batch loading:**
+
+```kotlin
+import org.dataloader.DataLoader
+import org.dataloader.DataLoaderRegistry
+
+val userLoader = DataLoader.newDataLoader<String, User> { ids ->
+    CompletableFuture.supplyAsync {
+        userRepository.findByIds(ids)
+    }
+}
+
+val registry = DataLoaderRegistry()
+registry.register("users", userLoader)
+```
+
+**2. Response caching:**
+
+```kotlin
+// Cache entire query results for common queries
+val queryCache = ConcurrentHashMap<String, ExecutionResult>()
+
+val cacheKey = "${query.hashCode()}_${variables.hashCode()}"
+val cachedResult = queryCache[cacheKey]
+if (cachedResult != null && !isStale(cachedResult)) {
+    return cachedResult
+}
+
+val result = viaduct.executeAsync(executionInput).await()
+queryCache[cacheKey] = result
+```
+
+**3. Field-level caching:**
+
+```kotlin
+import com.github.benmanes.caffeine.cache.Caffeine
+import java.util.concurrent.TimeUnit
+
+val fieldCache = Caffeine.newBuilder()
+    .expireAfterWrite(5, TimeUnit.MINUTES)
+    .maximumSize(10000)
+    .build<String, Any>()
+```
+
+### HTTP Server Tuning
+
+Configure your HTTP server for production load:
+
+**Jetty:**
+```kotlin
+import org.eclipse.jetty.server.Server
+import org.eclipse.jetty.util.thread.QueuedThreadPool
+
+val threadPool = QueuedThreadPool().apply {
+    minThreads = 10
+    maxThreads = 200
+    idleTimeout = 60000
+}
+
+val server = Server(threadPool)
+```
+
+**Ktor:**
+```kotlin
+import io.ktor.server.engine.embeddedServer
+import io.ktor.server.jetty.Jetty
+
+embeddedServer(Jetty, port = 8080) {
+    // ...
+}.start(wait = true)
+```
+
+## Monitoring and Observability
+
+### Metrics Collection
+
+Integrate with Micrometer for comprehensive metrics:
+
+```kotlin
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.prometheus.PrometheusConfig
+import io.micrometer.prometheus.PrometheusMeterRegistry
+
+val meterRegistry: MeterRegistry = PrometheusMeterRegistry(PrometheusConfig.DEFAULT)
+
+val viaduct = ViaductBuilder()
+    .withMeterRegistry(meterRegistry)
+    .build()
+```
+
+**Key metrics to monitor:**
+- Query execution time (percentiles: p50, p95, p99)
+- Error rate by query type
+- Resolver execution time
+- Data source connection pool utilization
+- Query complexity distribution
+- Cache hit/miss ratio
+- Concurrent request count
+- JVM memory and GC metrics
+
+### Error Reporting
+
+Implement comprehensive error reporting:
+
+```kotlin
+import viaduct.service.api.spi.ErrorReporter
+import graphql.GraphQLError
+
+class ProductionErrorReporter(
+    private val sentryClient: SentryClient,
+    private val logger: Logger
+) : ErrorReporter {
+    override fun report(error: Throwable, context: Map<String, Any>) {
+        // Log error locally
+        logger.error("Resolver error: ${error.message}", error)
+        
+        // Send to error tracking service
+        sentryClient.sendException(error, mapOf(
+            "query" to context["query"],
+            "variables" to context["variables"],
+            "userId" to context["userId"]
+        ))
+    }
+    
+    override fun reportGraphQLError(error: GraphQLError, context: Map<String, Any>) {
+        logger.warn("GraphQL error: ${error.message} at ${error.path}")
+    }
+}
+
+val viaduct = ViaductBuilder()
+    .withResolverErrorReporter(ProductionErrorReporter(sentryClient, logger))
+    .build()
+```
+
+### Logging
+
+Configure structured logging:
+
+```kotlin
+import org.slf4j.LoggerFactory
+import net.logstash.logback.argument.StructuredArguments.*
+
+val logger = LoggerFactory.getLogger("ViaductAPI")
+
+logger.info(
+    "GraphQL query executed",
+    keyValue("operationName", operationName),
+    keyValue("userId", userId),
+    keyValue("duration", durationMs),
+    keyValue("complexity", queryComplexity),
+    keyValue("hasErrors", result.errors.isNotEmpty())
+)
+```
+
+**Log levels:**
+- `ERROR`: Unhandled exceptions, system failures
+- `WARN`: GraphQL validation errors, deprecated field usage
+- `INFO`: Query execution metrics, authentication events
+- `DEBUG`: Detailed query execution, resolver invocations (avoid in production)
+
+### Distributed Tracing
+
+Implement distributed tracing for microservices:
+
+```kotlin
+import io.opentelemetry.api.trace.Tracer
+import io.opentelemetry.api.trace.Span
+
+class TracingResolver(
+    private val tracer: Tracer,
+    private val userService: UserService
+) {
+    fun getUser(id: String): User? {
+        val span = tracer.spanBuilder("resolver.user").startSpan()
+        try {
+            span.setAttribute("userId", id)
+            return userService.findById(id)
+        } finally {
+            span.end()
+        }
+    }
+}
+```
+
+## Error Handling
+
+### Custom Error Responses
+
+Provide user-friendly error messages while logging details:
+
+```kotlin
+import viaduct.service.api.spi.ResolverErrorBuilder
+import graphql.GraphQLError
+import graphql.language.SourceLocation
+
+class ProductionErrorBuilder : ResolverErrorBuilder {
+    override fun build(
+        exception: Throwable,
+        path: List<Any>,
+        locations: List<SourceLocation>
+    ): GraphQLError {
+        // Log internal details
+        logger.error("Resolver error at path: $path", exception)
+        
+        // Return sanitized error to client
+        return when (exception) {
+            is ValidationException -> 
+                GraphQLError.newError()
+                    .message(exception.message)
+                    .path(path)
+                    .locations(locations)
+                    .build()
+            
+            is AuthenticationException ->
+                GraphQLError.newError()
+                    .message("Authentication required")
+                    .extensions(mapOf("code" to "UNAUTHENTICATED"))
+                    .build()
+            
+            is AuthorizationException ->
+                GraphQLError.newError()
+                    .message("Permission denied")
+                    .extensions(mapOf("code" to "FORBIDDEN"))
+                    .build()
+            
+            else ->
+                GraphQLError.newError()
+                    .message("An internal error occurred")
+                    .extensions(mapOf(
+                        "code" to "INTERNAL_ERROR",
+                        "timestamp" to System.currentTimeMillis()
+                    ))
+                    .build()
+        }
+    }
+}
+
+val viaduct = ViaductBuilder()
+    .withDataFetcherErrorBuilder(ProductionErrorBuilder())
+    .build()
+```
+
+### Graceful Degradation
+
+Handle partial failures gracefully:
+
+```kotlin
+fun getUser(id: String): User? {
+    return try {
+        userService.findById(id)
+    } catch (e: DatabaseException) {
+        logger.error("Database error fetching user $id", e)
+        // Return cached data if available
+        userCache[id] ?: throw e
+    }
+}
+```
+
+## Security
+
+### Authentication
+
+Implement authentication at the HTTP layer:
+
+```kotlin
+import io.jsonwebtoken.Jwts
+
+fun authenticateRequest(authHeader: String?): User? {
+    val token = authHeader?.removePrefix("Bearer ") ?: return null
+    
+    return try {
+        val claims = Jwts.parserBuilder()
+            .setSigningKey(jwtSecret)
+            .build()
+            .parseClaimsJws(token)
+            .body
+        
+        val userId = claims["userId"] as String
+        userService.findById(userId)
+    } catch (e: Exception) {
+        logger.warn("Invalid authentication token", e)
+        null
+    }
+}
+
+// In your HTTP handler
+val user = authenticateRequest(request.headers["Authorization"])
+if (user == null) {
+    return respondUnauthorized()
+}
+
+val executionInput = ExecutionInput.create(
+    operationText = query,
+    variables = variables,
+    requestContext = mapOf("currentUser" to user)
+)
+```
+
+### Authorization
+
+Implement field-level authorization in resolvers:
+
+```kotlin
+import graphql.schema.DataFetchingEnvironment
+
+fun sensitiveField(env: DataFetchingEnvironment): String? {
+    val currentUser = env.graphQlContext.get<User>("currentUser")
+    
+    if (!currentUser.hasPermission("read:sensitive_data")) {
+        throw AuthorizationException("Insufficient permissions")
+    }
+    
+    return fetchSensitiveData()
+}
+```
+
+### Rate Limiting
+
+Protect against abuse:
+
+```kotlin
+import io.github.bucket4j.Bucket
+import io.github.bucket4j.Bandwidth
+import java.time.Duration
+
+val userBuckets = ConcurrentHashMap<String, Bucket>()
+
+fun rateLimitCheck(userId: String): Boolean {
+    val bucket = userBuckets.computeIfAbsent(userId) {
+        Bucket.builder()
+            .addLimit(Bandwidth.simple(1000, Duration.ofHours(1)))
+            .build()
+    }
+    
+    return bucket.tryConsume(1)
+}
+
+// In your HTTP handler
+if (!rateLimitCheck(currentUser.id)) {
+    return respondTooManyRequests()
+}
+```
+
+### Input Validation
+
+Validate all inputs:
+
+```kotlin
+fun createUser(input: CreateUserInput): User {
+    require(input.email.matches(emailRegex)) {
+        "Invalid email format"
+    }
+    
+    require(input.name.length in 1..100) {
+        "Name must be between 1 and 100 characters"
+    }
+    
+    return userService.create(input)
+}
+```
+
+## Scaling
+
+### Horizontal Scaling
+
+Viaduct instances are stateless and can be scaled horizontally:
+
+```yaml
+# Kubernetes deployment example
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: viaduct-api
+spec:
+  replicas: 5  # Scale to 5 instances
+  selector:
+    matchLabels:
+      app: viaduct-api
+  template:
+    metadata:
+      labels:
+        app: viaduct-api
+    spec:
+      containers:
+      - name: viaduct-api
+        image: myregistry/viaduct-api:latest
+        ports:
+        - containerPort: 8080
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+```
+
+### Load Balancing
+
+Configure load balancing:
+
+```yaml
+# Kubernetes service
+apiVersion: v1
+kind: Service
+metadata:
+  name: viaduct-api
+spec:
+  selector:
+    app: viaduct-api
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: LoadBalancer
+```
+
+### Auto-scaling
+
+Configure horizontal pod autoscaling:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: viaduct-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: viaduct-api
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+```
+
+## Health Checks
+
+Implement comprehensive health checks:
+
+```kotlin
+data class HealthStatus(
+    val status: String,
+    val version: String,
+    val uptime: Long,
+    val checks: Map<String, Boolean>
+)
+
+fun healthCheck(): HealthStatus {
+    val checks = mutableMapOf<String, Boolean>()
+    
+    // Check database connectivity
+    checks["database"] = try {
+        dataSource.connection.use { it.isValid(5) }
+    } catch (e: Exception) {
+        false
+    }
+    
+    // Check cache connectivity
+    checks["cache"] = try {
+        redisClient.ping()
+        true
+    } catch (e: Exception) {
+        false
+    }
+    
+    // Check external services
+    checks["authService"] = authService.isHealthy()
+    
+    val isHealthy = checks.values.all { it }
+    
+    return HealthStatus(
+        status = if (isHealthy) "UP" else "DOWN",
+        version = BuildConfig.VERSION,
+        uptime = System.currentTimeMillis() - startTime,
+        checks = checks
+    )
+}
+```
+
+## Deployment Strategies
+
+### Blue-Green Deployment
+
+1. Deploy new version to green environment
+2. Run smoke tests against green
+3. Switch load balancer to green
+4. Keep blue environment as rollback option
+5. Shut down blue after stability confirmed
+
+### Canary Deployment
+
+1. Deploy new version to small subset of instances (5-10%)
+2. Monitor error rates and performance
+3. Gradually increase traffic to new version
+4. Roll back if issues detected
+5. Complete rollout if metrics are healthy
+
+### Rolling Update
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: viaduct-api
+spec:
+  replicas: 10
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2        # Add 2 new pods before removing old
+      maxUnavailable: 1  # Allow 1 pod to be down during update
+```
+
+## Configuration Management
+
+Use environment variables for configuration:
+
+```kotlin
+val config = object {
+    val databaseUrl = System.getenv("DATABASE_URL") 
+        ?: throw IllegalStateException("DATABASE_URL not set")
+    val jwtSecret = System.getenv("JWT_SECRET")
+        ?: throw IllegalStateException("JWT_SECRET not set")
+    val redisUrl = System.getenv("REDIS_URL")
+    val logLevel = System.getenv("LOG_LEVEL") ?: "INFO"
+    val environment = System.getenv("ENVIRONMENT") ?: "production"
+}
+```
+
+## Checklist
+
+Before going to production:
+
+- [ ] Connection pooling configured for all data sources
+- [ ] Query complexity and depth limits set
+- [ ] Caching implemented (DataLoader, response, field-level)
+- [ ] Metrics collection integrated (Micrometer/Prometheus)
+- [ ] Error reporting configured (Sentry, CloudWatch, etc.)
+- [ ] Structured logging implemented
+- [ ] Distributed tracing set up (if microservices)
+- [ ] Authentication implemented
+- [ ] Authorization implemented at field level
+- [ ] Rate limiting configured
+- [ ] Input validation on all mutations
+- [ ] Health check endpoint implemented
+- [ ] Load testing completed
+- [ ] Auto-scaling configured
+- [ ] Deployment strategy chosen and tested
+- [ ] Monitoring dashboards created
+- [ ] Alerts configured for key metrics
+- [ ] Runbooks written for common issues
+- [ ] Disaster recovery plan documented
+- [ ] Security audit completed
+- [ ] Performance baseline established
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Embedding Viaduct" icon="code" href="embedding-viaduct">
+    Review the embedding guide
+  </Card>
+  <Card title="Development Server" icon="rocket" href="development-server">
+    Learn about local development
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/docs/service_engineers/monitoring">
+    Deep dive into monitoring and observability
+  </Card>
+  <Card title="Security" icon="shield" href="/docs/service_engineers/security">
+    Learn more about security best practices
+  </Card>
+</CardGroup>

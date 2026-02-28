@@ -1,0 +1,333 @@
+---
+title: 'Micronaut Starter Tutorial'
+description: 'Build a Viaduct application with Micronaut dependency injection'
+icon: 'syringe'
+---
+
+## Overview
+
+The Micronaut Starter demonstrates how to integrate Viaduct with Micronaut's powerful dependency injection (DI) framework. This tutorial is essential for building production-ready applications where resolvers need access to services, repositories, and other dependencies.
+
+## What You'll Learn
+
+- Integrating Viaduct with Micronaut's DI container
+- Using dependency injection in GraphQL resolvers
+- Separating development and production code with Gradle source sets
+- Fast development mode with ViaductServer
+- Production-ready configuration without the development server
+
+## Prerequisites
+
+- Java JDK 21 installed
+- `JAVA_HOME` environment variable set correctly or `java` in your PATH
+- Understanding of dependency injection concepts
+
+## Project Structure
+
+```
+micronaut-starter/
+├── src/
+│   ├── main/kotlin/com/example/viadapp/production/
+│   │   ├── ViaductConfiguration.kt         # Viaduct bean factory
+│   │   └── MicronautTenantCodeInjector.kt  # DI bridge for resolvers
+│   └── dev/kotlin/com/example/viadapp/dev/
+│       └── MicronautViaductFactory.kt      # ViaductServer integration (dev only)
+└── viadapp/                                 # Resolver module
+    └── src/main/kotlin/com/example/viadapp/
+        ├── HelloWorldResolver.kt
+        └── HelloWorldTenantModule.kt
+```
+
+## Key Concepts
+
+### Production vs Development
+
+**Production Build:**
+- Includes only `src/main/kotlin` (production code)
+- Does NOT include `viaduct-serve` dependency
+- Suitable for deployment with a full HTTP server
+
+**Development Build:**
+- Includes both `src/main/kotlin` and `src/dev/kotlin`
+- Includes `viaduct-serve` dependency for GraphiQL
+- Fast iteration with automatic schema reloading
+
+<Steps>
+
+### Configure the Viaduct Bean Factory
+
+The `ViaductConfiguration.kt:22` creates a Viaduct instance as a Micronaut bean:
+
+```kotlin
+package com.example.viadapp.production
+
+import io.micronaut.context.annotation.Bean
+import io.micronaut.context.annotation.Factory
+import viaduct.service.BasicViaductFactory
+import viaduct.service.TenantRegistrationInfo
+import viaduct.service.api.Viaduct
+
+@Factory
+class ViaductConfiguration(
+    private val micronautTenantCodeInjector: MicronautTenantCodeInjector
+) {
+    @Bean
+    fun providesViaduct(): Viaduct {
+        return BasicViaductFactory.create(
+            tenantRegistrationInfo = TenantRegistrationInfo(
+                tenantPackagePrefix = "com.example.viadapp",
+                tenantCodeInjector = micronautTenantCodeInjector
+            )
+        )
+    }
+}
+```
+
+**Key Points:**
+- `@Factory` marks this class as a bean factory
+- `@Bean` method provides the Viaduct instance
+- `tenantCodeInjector` enables DI for resolver classes
+- Micronaut automatically injects `MicronautTenantCodeInjector`
+
+### Implement the Tenant Code Injector
+
+The `MicronautTenantCodeInjector` bridges Viaduct and Micronaut's DI:
+
+```kotlin
+@Singleton
+class MicronautTenantCodeInjector(
+    private val beanContext: BeanContext
+) : TenantCodeInjector {
+    override fun <T : Any> getInstance(clazz: KClass<T>): T {
+        return beanContext.getBean(clazz.java)
+    }
+}
+```
+
+This allows Viaduct to request instances from Micronaut's container when creating resolvers.
+
+### Create Resolvers with Dependencies
+
+Resolvers can now use constructor injection:
+
+```kotlin
+import jakarta.inject.Singleton
+
+@Singleton
+class GreetingService {
+    fun getGreeting(): String = "Hello from Micronaut!"
+}
+
+@Resolver
+@Singleton
+class GreetingResolver(
+    private val greetingService: GreetingService  // Injected dependency
+) : QueryResolvers.Greeting() {
+    override suspend fun resolve(ctx: Context): String {
+        return greetingService.getGreeting()
+    }
+}
+```
+
+**Key Points:**
+- Both resolver and service are marked `@Singleton`
+- Dependencies are injected via constructor parameters
+- Micronaut manages the lifecycle of all beans
+
+### Set Up Development Mode
+
+The `MicronautViaductFactory.kt` in `src/dev/kotlin/` enables fast development:
+
+```kotlin
+import viaduct.serve.ViaductServerConfiguration
+import io.micronaut.context.ApplicationContext
+
+@ViaductServerConfiguration
+class MicronautViaductFactory : ViaductFactory {
+    override fun create(): Viaduct {
+        // Start only the Micronaut DI container (not the full HTTP server)
+        val context = ApplicationContext.run()
+        
+        // Get the Viaduct instance from DI
+        return context.getBean(Viaduct::class.java)
+    }
+}
+```
+
+**How It Works:**
+1. ViaductServer discovers this provider via `@ViaductServerConfiguration`
+2. Starts a minimal `ApplicationContext` (DI only, no HTTP server)
+3. Retrieves the `Viaduct` bean from the container
+4. Serves GraphQL requests with GraphiQL at `http://localhost:8080`
+
+### Configure Gradle Source Sets
+
+The `build.gradle.kts` separates development and production code:
+
+```kotlin
+sourceSets {
+    // Development-only source set
+    create("dev") {
+        kotlin.srcDir("src/dev/kotlin")
+        compileClasspath += sourceSets.main.get().output
+        runtimeClasspath += sourceSets.main.get().output
+    }
+}
+
+// Dev configuration extends from main
+val devImplementation by configurations.getting {
+    extendsFrom(configurations.implementation.get())
+}
+
+dependencies {
+    // Production dependencies
+    implementation("io.micronaut:micronaut-inject")
+    implementation("io.micronaut:micronaut-context")
+
+    // Development-only dependency
+    devImplementation("com.airbnb.viaduct:viaduct-serve")
+}
+
+// Serve task includes dev classes
+tasks.named<JavaExec>("serve") {
+    classpath += sourceSets["dev"].output
+    classpath += sourceSets["dev"].runtimeClasspath
+}
+```
+
+**Key Points:**
+- `dev` source set is separate from `main`
+- `devImplementation` dependencies are excluded from production builds
+- `serve` task explicitly includes dev classes and dependencies
+
+### Run in Development Mode
+
+Start the development server with GraphiQL:
+
+```bash
+./gradlew serve
+```
+
+This:
+- Starts only the Micronaut DI container (not the full HTTP server)
+- Provides GraphiQL IDE at `http://localhost:8080/graphiql`
+- Faster startup than a full Micronaut HTTP server
+
+Open your browser:
+
+```
+http://localhost:8080/graphiql
+```
+
+Run a query:
+
+```graphql
+query {
+  greeting
+  author
+}
+```
+
+### Enable Auto-Reload on Changes
+
+Use Gradle's continuous build mode:
+
+```bash
+./gradlew --continuous serve
+```
+
+Now when you modify resolver code, Gradle automatically recompiles and restarts the server.
+
+### Build for Production
+
+Create a production JAR that excludes development code:
+
+```bash
+./gradlew build
+```
+
+The resulting artifact:
+- Contains only `src/main/kotlin` code
+- Excludes `viaduct-serve` dependency
+- Excludes `MicronautViaductFactory`
+- Ready for deployment with a full Micronaut HTTP server
+
+</Steps>
+
+## How Dependency Injection Works
+
+### Resolver Instantiation Flow
+
+1. **Query Execution**: Viaduct needs a resolver instance
+2. **DI Request**: Calls `tenantCodeInjector.getInstance(ResolverClass::class)`
+3. **Micronaut Resolution**: `MicronautTenantCodeInjector` asks `BeanContext` for the bean
+4. **Dependency Injection**: Micronaut creates the resolver and injects its dependencies
+5. **Caching**: The instance is cached by Micronaut's singleton scope
+
+### Injecting Complex Dependencies
+
+You can inject any Micronaut bean into resolvers:
+
+```kotlin
+@Singleton
+class UserRepository {
+    suspend fun findById(id: String): User? { /* ... */ }
+}
+
+@Singleton
+class AuthService {
+    fun getCurrentUserId(): String { /* ... */ }
+}
+
+@Resolver
+@Singleton
+class CurrentUserResolver(
+    private val userRepository: UserRepository,
+    private val authService: AuthService
+) : QueryResolvers.CurrentUser() {
+    override suspend fun resolve(ctx: Context): User? {
+        val userId = authService.getCurrentUserId()
+        return userRepository.findById(userId)
+    }
+}
+```
+
+## Development Workflow
+
+### Fast Iteration Cycle
+
+1. **Start development server**: `./gradlew --continuous serve`
+2. **Modify resolvers or schema**
+3. **Gradle auto-recompiles**
+4. **Refresh GraphiQL** to test changes
+
+No manual restarts needed!
+
+### Production Deployment
+
+1. **Build production JAR**: `./gradlew build`
+2. **Deploy** to your server
+3. **Run with Micronaut HTTP server**:
+
+```kotlin
+fun main(args: Array<String>) {
+    Micronaut.run(Application::class.java, *args)
+}
+```
+
+The Viaduct bean is available for injection into HTTP controllers.
+
+## Why Use Micronaut with Viaduct?
+
+1. **Dependency Injection**: Resolvers can access databases, services, and external APIs
+2. **Compile-Time DI**: Micronaut performs DI at compile time (no reflection)
+3. **Fast Startup**: Minimal overhead compared to Spring
+4. **Cloud-Native**: Built for microservices and serverless
+5. **Clean Separation**: Development tools don't bloat production artifacts
+
+## Next Steps
+
+- Review the [Star Wars Tutorial](/tutorials/starwars) which also uses Micronaut DI
+- Learn about [Custom Context](/advanced/custom-context) for request-scoped data
+- Study [Batch Resolvers](/advanced/batch-resolvers) with injected dependencies
+- Read about [Testing](/essentials/testing) with Micronaut test support

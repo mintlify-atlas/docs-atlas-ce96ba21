@@ -1,0 +1,442 @@
+---
+title: Embedding Viaduct
+description: Integrate Viaduct into your web server for production deployment
+---
+
+## Overview
+
+Embedding Viaduct into your HTTP server is the recommended approach for production deployments. This gives you full control over HTTP handling, authentication, routing, and integration with your existing infrastructure.
+
+The core integration pattern is simple:
+1. Create a Viaduct instance at application startup
+2. Create an HTTP route that accepts GraphQL requests
+3. Call `viaduct.execute()` or `viaduct.executeAsync()` with the request
+4. Return the result to the client
+
+## Creating a Viaduct Instance
+
+### Using BasicViaductFactory (Recommended)
+
+For most applications, use `BasicViaductFactory` which provides sensible defaults:
+
+```kotlin
+import viaduct.service.BasicViaductFactory
+import viaduct.service.SchemaRegistrationInfo
+import viaduct.service.TenantRegistrationInfo
+import viaduct.service.api.Viaduct
+
+val viaduct: Viaduct = BasicViaductFactory.create(
+    schemaRegistrationInfo = SchemaRegistrationInfo(
+        scopes = listOf(
+            SchemaScopeInfo(schemaId = "publicSchema")
+        )
+    ),
+    tenantRegistrationInfo = TenantRegistrationInfo(
+        tenantPackagePrefix = "com.example.myapp"
+    )
+)
+```
+
+**Key parameters:**
+- `tenantPackagePrefix`: The package prefix where your resolvers and GraphQL modules are located
+- `schemaRegistrationInfo`: Optional schema configuration for multi-tenant or scoped schemas
+- `tenantCodeInjector`: Optional dependency injection integration (defaults to reflection with zero-arg constructors)
+
+### Using ViaductBuilder (Advanced)
+
+For fine-grained control over error reporting, metrics, and other SPI implementations:
+
+```kotlin
+import viaduct.service.ViaductBuilder
+import io.micrometer.core.instrument.MeterRegistry
+
+val viaduct = ViaductBuilder()
+    .withTenantAPIBootstrapperBuilder(myBootstrapperBuilder)
+    .withMeterRegistry(meterRegistry)
+    .withResolverErrorReporter(errorReporter)
+    .build()
+```
+
+See `service/api/src/main/kotlin/viaduct/service/api/Viaduct.kt:1` for the full API.
+
+## Executing GraphQL Operations
+
+Viaduct provides two execution methods:
+
+### Synchronous Execution
+
+```kotlin
+import viaduct.service.api.ExecutionInput
+import viaduct.service.api.ExecutionResult
+
+val executionInput = ExecutionInput.create(
+    operationText = query,
+    variables = variables,
+    operationName = operationName
+)
+
+val result: ExecutionResult = viaduct.execute(executionInput)
+```
+
+### Asynchronous Execution (Recommended)
+
+```kotlin
+import kotlinx.coroutines.future.await
+
+val executionInput = ExecutionInput.create(
+    operationText = query,
+    variables = variables,
+    operationName = operationName
+)
+
+val result: ExecutionResult = viaduct.executeAsync(executionInput).await()
+```
+
+The result can be converted to the GraphQL specification format:
+
+```kotlin
+val specResult: Map<String, Any?> = result.toSpecification()
+```
+
+## HTTP Server Integration Examples
+
+### Jetty Example
+
+A complete example using Eclipse Jetty servlets:
+
+```kotlin
+import org.eclipse.jetty.server.Server
+import org.eclipse.jetty.servlet.ServletContextHandler
+import org.eclipse.jetty.servlet.ServletHolder
+import jakarta.servlet.http.HttpServlet
+import jakarta.servlet.http.HttpServletRequest
+import jakarta.servlet.http.HttpServletResponse
+import viaduct.service.BasicViaductFactory
+import viaduct.service.TenantRegistrationInfo
+
+class ViaductServlet(private val viaduct: Viaduct) : HttpServlet() {
+    private val objectMapper = ObjectMapper()
+
+    override fun doPost(
+        req: HttpServletRequest,
+        resp: HttpServletResponse
+    ) {
+        val body = req.inputStream.readAllBytes().toString(StandardCharsets.UTF_8)
+        val requestMap = objectMapper.readValue(body, Map::class.java)
+        
+        val query = requestMap["query"] as? String
+        if (query == null) {
+            resp.status = 400
+            return
+        }
+
+        @Suppress("UNCHECKED_CAST")
+        val variables = (requestMap["variables"] as? Map<String, Any>) ?: emptyMap()
+        val operationName = requestMap["operationName"] as? String
+
+        val executionInput = ExecutionInput.create(
+            operationText = query,
+            variables = variables,
+            operationName = operationName
+        )
+
+        val result = runBlocking {
+            viaduct.executeAsync(executionInput).join()
+        }
+
+        val statusCode = if (result.errors.isNotEmpty()) 400 else 200
+        resp.status = statusCode
+        resp.contentType = "application/json"
+        objectMapper.writeValue(resp.outputStream, result.toSpecification())
+    }
+}
+
+fun main() {
+    val viaduct = BasicViaductFactory.create(
+        tenantRegistrationInfo = TenantRegistrationInfo(
+            tenantPackagePrefix = "com.example.viadapp"
+        )
+    )
+
+    val server = Server(8080)
+    val context = ServletContextHandler(ServletContextHandler.NO_SESSIONS)
+    context.contextPath = "/"
+    context.addServlet(ServletHolder(ViaductServlet(viaduct)), "/graphql")
+    
+    server.handler = context
+    server.start()
+    server.join()
+}
+```
+
+See the complete example in `demoapps/jetty-starter/src/main/kotlin/com/example/viadapp/JettyViaductApp.kt:1`.
+
+### Ktor Example
+
+Integrating with Ktor using coroutines:
+
+```kotlin
+import io.ktor.server.application.Application
+import io.ktor.server.application.call
+import io.ktor.server.request.receive
+import io.ktor.server.response.respond
+import io.ktor.server.routing.post
+import io.ktor.server.routing.routing
+import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.future.await
+import viaduct.service.BasicViaductFactory
+import viaduct.service.TenantRegistrationInfo
+import viaduct.service.api.ExecutionInput
+
+fun Application.configureRouting() {
+    val viaduct = BasicViaductFactory.create(
+        tenantRegistrationInfo = TenantRegistrationInfo(
+            tenantPackagePrefix = "com.example.viadapp"
+        )
+    )
+
+    routing {
+        post("/graphql") {
+            @Suppress("UNCHECKED_CAST")
+            val request = call.receive<Map<String, Any?>>() as Map<String, Any>
+
+            val query = request["query"] as? String
+            if (query == null) {
+                call.respond(
+                    HttpStatusCode.BadRequest,
+                    mapOf("errors" to listOf(mapOf("message" to "Query parameter is required")))
+                )
+                return@post
+            }
+
+            @Suppress("UNCHECKED_CAST")
+            val executionInput = ExecutionInput.create(
+                operationText = query,
+                variables = (request["variables"] as? Map<String, Any>) ?: emptyMap(),
+            )
+
+            val result = viaduct.executeAsync(executionInput).await()
+
+            val statusCode = when {
+                result.errors.isNotEmpty() -> HttpStatusCode.BadRequest
+                else -> HttpStatusCode.OK
+            }
+            call.respond(statusCode, result.toSpecification())
+        }
+    }
+}
+```
+
+See the complete example in `demoapps/ktor-starter/src/main/kotlin/com/example/viadapp/Routing.kt:1`.
+
+### Micronaut Example
+
+Using Micronaut's dependency injection with Viaduct:
+
+**ViaductConfiguration.kt** - Creating the Viaduct bean:
+
+```kotlin
+import io.micronaut.context.annotation.Bean
+import io.micronaut.context.annotation.Factory
+import viaduct.service.BasicViaductFactory
+import viaduct.service.SchemaRegistrationInfo
+import viaduct.service.TenantRegistrationInfo
+import viaduct.service.api.Viaduct
+
+@Factory
+class ViaductConfiguration(
+    val tenantCodeInjector: MicronautTenantCodeInjector
+) {
+    @Bean
+    fun providesViaduct(): Viaduct {
+        return BasicViaductFactory.create(
+            schemaRegistrationInfo = SchemaRegistrationInfo(
+                scopes = listOf(
+                    SchemaScopeInfo(schemaId = "publicSchema")
+                )
+            ),
+            tenantRegistrationInfo = TenantRegistrationInfo(
+                tenantPackagePrefix = "com.example.myapp",
+                tenantCodeInjector = tenantCodeInjector
+            )
+        )
+    }
+}
+```
+
+**ViaductRestController.kt** - Creating the GraphQL endpoint:
+
+```kotlin
+import io.micronaut.http.HttpResponse
+import io.micronaut.http.HttpStatus
+import io.micronaut.http.annotation.Body
+import io.micronaut.http.annotation.Controller
+import io.micronaut.http.annotation.Post
+import kotlinx.coroutines.future.await
+import viaduct.service.api.ExecutionInput
+import viaduct.service.api.Viaduct
+
+@Controller
+class ViaductRestController(
+    private val viaduct: Viaduct
+) {
+    @Post("/graphql")
+    suspend fun graphql(
+        @Body request: Map<String, Any>
+    ): HttpResponse<Map<String, Any?>> {
+        val executionInput = ExecutionInput.create(
+            operationText = request["query"] as String,
+            variables = (request["variables"] as? Map<String, Any>) ?: emptyMap(),
+        )
+        
+        val result = viaduct.executeAsync(executionInput).await()
+        val status = if (result.errors.isNotEmpty()) {
+            HttpStatus.BAD_REQUEST
+        } else {
+            HttpStatus.OK
+        }
+        
+        return HttpResponse.status<Map<String, Any?>>(status)
+            .body(result.toSpecification())
+    }
+}
+```
+
+See the complete example in:
+- `demoapps/starwars/src/main/kotlin/com/example/starwars/service/viaduct/ViaductConfiguration.kt:1`
+- `demoapps/starwars/src/main/kotlin/com/example/starwars/service/viaduct/ViaductRestController.kt:1`
+
+## Dependency Injection Integration
+
+By default, Viaduct uses reflection to instantiate resolvers with zero-argument constructors. To integrate with a dependency injection framework, provide a custom `TenantCodeInjector`:
+
+```kotlin
+import viaduct.service.api.spi.TenantCodeInjector
+import kotlin.reflect.KClass
+
+class MyDIFrameworkInjector(
+    private val applicationContext: ApplicationContext
+) : TenantCodeInjector {
+    override fun <T : Any> getInstance(clazz: KClass<T>): T {
+        return applicationContext.getBean(clazz.java)
+    }
+}
+
+val viaduct = BasicViaductFactory.create(
+    tenantRegistrationInfo = TenantRegistrationInfo(
+        tenantPackagePrefix = "com.example.myapp",
+        tenantCodeInjector = MyDIFrameworkInjector(applicationContext)
+    )
+)
+```
+
+This allows your resolvers to use constructor injection:
+
+```kotlin
+import viaduct.annotations.Resolver
+import jakarta.inject.Inject
+
+@Resolver
+class UserResolver @Inject constructor(
+    private val userService: UserService,
+    private val authService: AuthService
+) {
+    fun user(id: String): User? {
+        return userService.findById(id)
+    }
+}
+```
+
+## Request Context
+
+You can pass request-specific context (like authentication info) through `ExecutionInput`:
+
+```kotlin
+val executionInput = ExecutionInput.create(
+    operationText = query,
+    variables = variables,
+    requestContext = mapOf(
+        "userId" to currentUserId,
+        "authToken" to authToken,
+        "ipAddress" to requestIp
+    )
+)
+```
+
+Access the context in resolvers via the `DataFetchingEnvironment`:
+
+```kotlin
+import graphql.schema.DataFetchingEnvironment
+
+fun currentUser(env: DataFetchingEnvironment): User? {
+    val userId = env.graphQlContext.get<String>("userId")
+    return userService.findById(userId)
+}
+```
+
+## Multi-Schema Support
+
+Viaduct supports multiple schemas with different scope configurations:
+
+```kotlin
+import viaduct.service.api.SchemaId
+
+val defaultSchemaId = SchemaId.Scoped(
+    id = "publicSchema",
+    scopeIds = setOf("default")
+)
+
+val adminSchemaId = SchemaId.Scoped(
+    id = "adminSchema",
+    scopeIds = setOf("default", "admin")
+)
+
+val viaduct = BasicViaductFactory.create(
+    schemaRegistrationInfo = SchemaRegistrationInfo(
+        scopes = listOf(
+            defaultSchemaId.toSchemaScopeInfo(),
+            adminSchemaId.toSchemaScopeInfo()
+        )
+    ),
+    tenantRegistrationInfo = TenantRegistrationInfo(
+        tenantPackagePrefix = "com.example.myapp"
+    )
+)
+
+// Execute against a specific schema
+val result = viaduct.executeAsync(executionInput, adminSchemaId).await()
+```
+
+## Error Handling
+
+Handle execution errors appropriately:
+
+```kotlin
+val result = viaduct.executeAsync(executionInput).await()
+
+if (result.errors.isNotEmpty()) {
+    // GraphQL errors (validation, resolver errors, etc.)
+    logger.warn("GraphQL errors: ${result.errors}")
+    return respondWithStatus(400, result.toSpecification())
+}
+
+if (result.data == null) {
+    // Query executed but returned null
+    logger.info("Query returned null data")
+    return respondWithStatus(200, result.toSpecification())
+}
+
+// Success
+return respondWithStatus(200, result.toSpecification())
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Development Server" icon="rocket" href="development-server">
+    Learn about the built-in development server
+  </Card>
+  <Card title="Production Deployment" icon="server" href="production">
+    Production considerations and best practices
+  </Card>
+</CardGroup>

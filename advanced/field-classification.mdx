@@ -1,0 +1,393 @@
+---
+title: Field Classification
+description: Understanding field visibility and classification in Viaduct schemas
+---
+
+Viaduct provides a field classification system to control the visibility and usage of fields within your GraphQL schema. This system distinguishes between fields that are publicly accessible, internal-only, or used purely for backing data storage.
+
+## Field Types
+
+Viaduct recognizes three main categories of fields:
+
+1. **Public Fields** - Accessible to clients through the GraphQL API
+2. **Private Fields** - Internal-only fields for resolver logic
+3. **Backing Data Fields** - Storage fields with dynamic typing
+
+## Public Fields
+
+Public fields are standard GraphQL fields that are exposed to clients based on their scope configuration.
+
+### Basic Public Field
+
+```graphql
+type User @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  name: String
+  email: String
+  avatar: String
+}
+```
+
+All fields in this example are public and visible to any client with access to the `viaduct` or `viaduct:public` scopes.
+
+### Scope-Restricted Public Fields
+
+You can further restrict public fields using type extensions:
+
+```graphql
+type User @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  name: String
+}
+
+extend type User @scope(to: ["viaduct"]) {
+  email: String
+  internalNotes: String
+}
+```
+
+Here, `email` and `internalNotes` are public fields but only visible to clients with the `viaduct` scope.
+
+## Private Fields
+
+Private fields are fields that are only visible to the defining tenant module. They are used when you want to hold certain data only for internal calculation purposes.
+
+### Purpose
+
+Private fields are used for:
+
+- Intermediate computation results
+- Caching data between resolvers within the same request
+- Storing data that should not be accessible to other tenant modules
+- Internal implementation details
+
+### Scope Annotation
+
+To make a field private to the Viaduct service (not accessible to client services), use the `viaduct-private` scope:
+
+```graphql
+type User @scope(to: ["viaduct"]) {
+  id: ID!
+  name: String
+}
+
+extend type User @scope(to: ["viaduct-private"]) {
+  cachedPreferences: JSON
+  computedScore: Float
+}
+```
+
+<Warning>
+  As of the current version, "private to tenant module" visibility is not yet supported. Use `@scope(to: ["viaduct-private"])` to prevent fields from being visible to Viaduct client services.
+</Warning>
+
+### Accessing Private Fields
+
+Private fields are accessed in resolvers using fragments:
+
+```kotlin
+@Resolver(
+    objectValueFragment = """
+        fragment _ on User {
+            id
+            name
+            cachedPreferences
+        }
+    """
+)
+class UserRecommendationsResolver : UserResolvers.Recommendations() {
+    override suspend fun resolve(ctx: Context): List<Recommendation> {
+        val userId = ctx.objectValue.getId()
+        val preferences = ctx.objectValue.getCachedPreferences()
+        
+        return recommendationService.getRecommendations(userId, preferences)
+    }
+}
+```
+
+## Backing Data Fields
+
+Backing data fields use the special `BackingData` scalar type, which allows dynamic typing and is **only allowed on private fields**.
+
+### The BackingData Scalar
+
+For all types other than `BackingData`, code generation for private fields happens normally. For `BackingData` fields:
+
+- Getters and setters are **not generated**
+- Runtime casting is used via dynamic setter/builder and getter methods
+- Type checking happens at write time
+
+### Declaring Backing Data Fields
+
+Use the `@backingData` directive to specify the actual type:
+
+```graphql
+type Product @scope(to: ["viaduct"]) {
+  id: ID!
+  name: String
+}
+
+extend type Product @scope(to: ["viaduct-private"]) {
+  cachedDetails: BackingData @backingData(class: "com.example.data.ProductDetails")
+}
+```
+
+### Working with Backing Data
+
+Backing data fields require special handling in resolvers:
+
+```kotlin
+// Setting backing data
+@Resolver
+class ProductNodeResolver @Inject constructor(
+    private val productService: ProductService
+) : NodeResolvers.Product() {
+    override suspend fun resolve(ctx: Context): Product {
+        val productId = ctx.id.internalID
+        val details = productService.fetchDetails(productId)
+        
+        return Product.Builder(ctx)
+            .name(details.name)
+            .set("cachedDetails", details)  // Dynamic setter
+            .build()
+    }
+}
+
+// Reading backing data
+@Resolver(
+    objectValueFragment = """
+        fragment _ on Product {
+            id
+            cachedDetails
+        }
+    """
+)
+class ProductDescriptionResolver : ProductResolvers.Description() {
+    override suspend fun resolve(ctx: Context): String {
+        // Dynamic getter with runtime casting
+        val details = ctx.objectValue.get("cachedDetails") as ProductDetails
+        
+        return formatDescription(details)
+    }
+}
+```
+
+### When to Use Backing Data
+
+Use backing data fields when:
+
+- You need to cache complex data structures between resolvers
+- The data structure is internal and doesn't need to be part of the GraphQL schema
+- You want to avoid creating intermediate GraphQL types
+- The data is purely for resolver implementation details
+
+<Tip>
+  Backing data fields provide flexibility but lose type safety. Use them sparingly and consider creating proper GraphQL types when possible.
+</Tip>
+
+## Field Stability Annotations
+
+While not enforced by Viaduct itself, many teams use documentation conventions to mark field stability:
+
+### Stable Fields
+
+Fields considered part of the stable public API:
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  "Stable field: Unique identifier for the user"
+  id: ID!
+  
+  "Stable field: User's display name"
+  name: String!
+}
+```
+
+### Beta Fields
+
+Fields that may change:
+
+```graphql
+extend type User @scope(to: ["viaduct:public"]) {
+  "Beta field: Experimental preference system. Subject to change."
+  preferences: UserPreferences @deprecated(reason: "Use preferencesV2")
+  
+  "Beta field: New preference system"
+  preferencesV2: UserPreferencesV2
+}
+```
+
+### Internal Fields
+
+Fields explicitly marked as internal:
+
+```graphql
+extend type User @scope(to: ["viaduct"]) {
+  "Internal only: Admin notes and moderation data"
+  internalNotes: String
+  
+  "Internal only: System flags for internal processing"
+  systemFlags: [String]
+}
+```
+
+## Deprecation
+
+Use the `@deprecated` directive to mark fields for removal:
+
+```graphql
+type User @scope(to: ["viaduct:public"]) {
+  id: ID!
+  
+  name: String @deprecated(reason: "Use firstName and lastName instead")
+  
+  firstName: String
+  lastName: String
+}
+```
+
+Deprecated fields:
+- Remain in the schema for backward compatibility
+- Show deprecation warnings in introspection
+- Can be removed after client migration
+
+## Classification Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Use Public Fields by Default" icon="eye">
+    Most fields should be public and controlled via scopes. Only use private fields when necessary.
+  </Card>
+  
+  <Card title="Document Field Purpose" icon="book">
+    Add descriptions to fields explaining their purpose and stability guarantees.
+  </Card>
+  
+  <Card title="Minimize Backing Data" icon="minimize">
+    Use backing data sparingly. Prefer proper GraphQL types for better type safety.
+  </Card>
+  
+  <Card title="Plan Deprecations" icon="calendar">
+    Use @deprecated directive and plan migration timelines before removing fields.
+  </Card>
+</CardGroup>
+
+## Example: Complete Classification
+
+```graphql
+# Public fields for all clients
+type Listing @scope(to: ["viaduct", "viaduct:public"]) {
+  id: ID!
+  title: String!
+  description: String
+  price: BigDecimal!
+}
+
+# Internal fields for backend services
+extend type Listing @scope(to: ["viaduct"]) {
+  hostId: ID!
+  internalStatus: String
+  moderationNotes: String
+}
+
+# Private fields for resolver implementation
+extend type Listing @scope(to: ["viaduct-private"]) {
+  # Backing data for caching
+  cachedDetails: BackingData @backingData(class: "com.example.ListingDetails")
+  
+  # Computed intermediate values
+  scoreComponents: JSON
+}
+
+# Deprecated fields
+extend type Listing @scope(to: ["viaduct:public"]) {
+  oldPriceField: String @deprecated(reason: "Use price instead")
+}
+```
+
+## Resolver Example: Using Different Field Types
+
+```kotlin
+@Resolver
+class ListingNodeResolver @Inject constructor(
+    private val listingService: ListingService
+) : NodeResolvers.Listing() {
+    override suspend fun resolve(ctx: Context): Listing {
+        val listingId = ctx.id.internalID
+        val details = listingService.fetchDetails(listingId)
+        
+        return Listing.Builder(ctx)
+            // Public fields
+            .title(details.title)
+            .description(details.description)
+            .price(details.price)
+            // Internal fields (only in viaduct scope)
+            .hostId(GlobalID.from("User", details.hostId))
+            .internalStatus(details.status)
+            // Private backing data field
+            .set("cachedDetails", details)
+            .build()
+    }
+}
+
+@Resolver(
+    objectValueFragment = """
+        fragment _ on Listing {
+            id
+            cachedDetails
+            scoreComponents
+        }
+    """
+)
+class ListingScoreResolver : ListingResolvers.Score() {
+    override suspend fun resolve(ctx: Context): Float {
+        // Access private backing data field
+        val details = ctx.objectValue.get("cachedDetails") as ListingDetails
+        
+        // Access private computed field
+        val components = ctx.objectValue.getScoreComponents()
+        
+        return calculateScore(details, components)
+    }
+}
+```
+
+## Type Safety Considerations
+
+### Public Fields: Full Type Safety
+
+```kotlin
+// Compile-time type checking
+val title: String = ctx.objectValue.getTitle()
+val price: BigDecimal = ctx.objectValue.getPrice()
+```
+
+### Private Fields: Full Type Safety
+
+```kotlin
+// Compile-time type checking (except BackingData)
+val preferences: JSON = ctx.objectValue.getCachedPreferences()
+val score: Float = ctx.objectValue.getComputedScore()
+```
+
+### Backing Data Fields: Runtime Type Safety
+
+```kotlin
+// Runtime casting required
+val details = ctx.objectValue.get("cachedDetails") as ListingDetails
+
+// Type checking happens at write time
+builder.set("cachedDetails", details)  // Type checked
+builder.set("cachedDetails", "wrong")  // Runtime error
+```
+
+## See Also
+
+<CardGroup cols={2}>
+  <Card title="Schema Scopes" icon="eye" href="/advanced/scopes">
+    Learn about controlling field visibility with @scope
+  </Card>
+  
+  <Card title="Schema Management" icon="code-branch" href="/advanced/schema-management">
+    Best practices for evolving your schema over time
+  </Card>
+</CardGroup>

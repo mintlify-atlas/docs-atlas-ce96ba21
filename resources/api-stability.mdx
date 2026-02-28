@@ -1,0 +1,245 @@
+---
+title: API Stability
+description: Understanding API stability annotations and guarantees in Viaduct
+---
+
+## Overview
+
+Viaduct uses explicit annotations to communicate the stability level of its APIs. This helps developers understand which parts of the framework are safe to depend on for production use and which are still evolving.
+
+<Info>
+The Viaduct engine is in production at scale at Airbnb and has proven reliable. The developer API is under active development, and this system of annotations helps you understand which parts are stable and which may change.
+</Info>
+
+## Stability Annotations
+
+Viaduct uses four primary annotations to mark API stability:
+
+### `@StableApi`
+
+**Long-term public contract for all consumers**
+
+- **Who should use it:** All consumers, including production applications
+- **Guarantees:** Binary compatible within a major version; removal only via deprecation cycle
+- **Behavior:** Does not require opt-in; can be used freely
+- **Example use cases:** Core types, established resolver patterns, well-tested utilities
+
+```kotlin
+@StableApi
+class PublicController {
+    fun publicEndpoint() {} // Covered by class annotation
+}
+```
+
+### `@ExperimentalApi`
+
+**Public but evolving - use with caution**
+
+- **Who should use it:** Early adopters willing to adapt to changes
+- **Guarantees:** May change or be removed in any release without deprecation
+- **Behavior:** Requires opt-in; produces compiler **warning** without `@OptIn(ExperimentalApi::class)`
+- **Example use cases:** New features, APIs under active development, proposals being validated
+
+```kotlin
+@ExperimentalApi
+fun newCapability(): String = "v2"
+
+// Usage requires opt-in
+@OptIn(ExperimentalApi::class)
+fun useIt() {
+    newCapability()
+}
+```
+
+### `@InternalApi`
+
+**Internal implementation - not for consumers**
+
+- **Who should use it:** Viaduct framework developers only
+- **Guarantees:** None - can change or disappear at any time
+- **Behavior:** Requires opt-in; produces compiler **error** without `@OptIn(InternalApi::class)`
+- **Example use cases:** Framework internals, implementation details, utilities for generated code
+
+```kotlin
+@InternalApi
+class InternalOnlyService {
+    fun methodA() {}
+    fun methodB() {}
+}
+```
+
+### `@VisibleForTest`
+
+**Testing infrastructure only**
+
+- **Who should use it:** Viaduct's own test code
+- **Guarantees:** None - intended only for internal testing
+- **Behavior:** Requires opt-in; produces compiler **error** without opt-in
+- **Example use cases:** Test fixtures, diagnostics, internal testing utilities
+
+```kotlin
+@VisibleForTest
+fun internalTestHook() { /* ... */ }
+```
+
+## Stability Levels Summary
+
+| Annotation | Meaning | Who Should Use | Guarantees | Opt-in Required |
+|------------|---------|----------------|------------|------------------|
+| `@StableApi` | Long-term public contract | All consumers | Binary compatible within major version | No |
+| `@ExperimentalApi` | Public but evolving | Early adopters | May change in any release | Yes (warning) |
+| `@InternalApi` | Not a consumer contract | Framework developers | No stability guarantee | Yes (error) |
+| `@VisibleForTest` | Internal testing only | Viaduct tests | No stability guarantee | Yes (error) |
+
+## Practical Guidance
+
+### For Application Developers
+
+1. **Prefer `@StableApi`** - Build your production applications on stable APIs whenever possible
+2. **Use `@ExperimentalApi` selectively** - Only opt-in to experimental APIs when:
+   - You need cutting-edge features
+   - You're willing to adapt to changes
+   - You isolate usage behind your own abstractions
+3. **Avoid `@InternalApi`** - These are framework internals and may break without warning
+4. **Never use `@VisibleForTest`** - These are for Viaduct's internal tests only
+
+### Example: Mixing Stability Levels
+
+```kotlin
+@StableApi
+class MyController {
+    // Stable public method
+    fun publicEndpoint() {}
+
+    // Internal helper - not part of public API
+    @InternalApi
+    fun internalHelper() {}
+}
+```
+
+In this example:
+- The class and `publicEndpoint()` are part of the stable public API
+- `internalHelper()` is an internal implementation detail
+
+## Deprecation and Migration
+
+### `@Deprecated` Annotation
+
+When an API is scheduled for removal, it's marked with `@Deprecated` instead of a stability annotation.
+
+```kotlin
+@Deprecated(
+    message = "Use newFoo() instead.",
+    replaceWith = ReplaceWith("newFoo()")
+)
+fun oldFoo() { /* ... */ }
+
+@StableApi
+fun newFoo() { /* ... */ }
+```
+
+**Important notes:**
+
+- Deprecated APIs do not carry stability annotations
+- When an API becomes deprecated, the previous stability annotation is removed
+- Migration paths are documented in the deprecation message
+- Removal typically happens only in major version updates
+
+## Upgrade Expectations
+
+When upgrading Viaduct, expect different behaviors depending on the stability level:
+
+### Stable APIs (`@StableApi`)
+
+- Should remain binary compatible within a major version
+- Breaking changes coordinated via deprecation and major version bumps
+- Safe to depend on for production applications
+
+### Experimental APIs (`@ExperimentalApi`)
+
+- May change between releases, even minor versions
+- Re-test and re-validate call sites after upgrades
+- Consider isolating usage behind your own stable abstractions
+
+### Internal APIs (`@InternalApi`)
+
+- May break without warning in any release
+- If you opted in, you own the risk
+- Expect no migration path or deprecation cycle
+
+### Deprecated APIs
+
+- Follow migration guidance provided
+- Plan to remove usage before the next major version
+- Check release notes for removal timelines
+
+## Public API Surface
+
+Viaduct's external public surface is defined by:
+
+1. **Kotlin visibility** - What is technically `public` and visible outside the module
+2. **Designated public packages** - Packages intended for consumer use
+
+Key modules with public APIs:
+
+- `tenant/api` - Tenant developer API (includes generated code)
+- `service/api` - Service configuration API
+- `service/wiring` - Service setup and wiring
+
+<Warning>
+Everything outside canonical public packages should be treated as implementation detail, even if it's `public` in Kotlin.
+</Warning>
+
+## Opt-in Configuration
+
+Kotlin's `@RequiresOptIn` mechanism enforces stability guarantees at compile time.
+
+### Module-level Opt-in
+
+Internal Viaduct modules typically opt in to all stability levels:
+
+```kotlin
+kotlinOptions {
+    freeCompilerArgs += listOf(
+        "-opt-in=viaduct.api.InternalApi",
+        "-opt-in=viaduct.api.ExperimentalApi",
+        "-opt-in=viaduct.api.VisibleForTest"
+    )
+}
+```
+
+### Call-site Opt-in
+
+Consumer code should use `@OptIn` explicitly:
+
+```kotlin
+@OptIn(ExperimentalApi::class)
+fun myExperimentalFeature() {
+    // Use experimental APIs here
+}
+```
+
+## Binary Compatibility Validation
+
+Viaduct uses the Kotlin Binary Compatibility Validator (BCV) to track and enforce the public binary API.
+
+- Declarations with `@InternalApi` or `@VisibleForTest` are excluded from `.api` dumps
+- Only stable and experimental APIs are tracked for binary compatibility
+- This ensures internal changes don't affect the public API surface
+
+## For Contributors
+
+If you're contributing to Viaduct, see the [API Stability Contributors Guide](/docs/developers/api_stability/contributors_guide) for detailed guidance on:
+
+- When to use each annotation
+- How annotations interact with BCV
+- Decision trees for choosing the right annotation
+- Examples of valid and invalid annotation usage
+
+## Questions?
+
+If you have questions about API stability or which APIs to use:
+
+- Check the [roadmap](/roadmap) for future API plans
+- Review the [API reference](/docs/developers/viaduct_api/) for available APIs
+- Ask in [GitHub Discussions](https://github.com/airbnb/viaduct/discussions)
